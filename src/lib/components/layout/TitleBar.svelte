@@ -39,7 +39,7 @@
 <header class="titlebar" data-tauri-drag-region>
 	<div class="titlebar-left" data-tauri-drag-region>
 		<img src="/app-icon.png" alt="" class="app-icon" draggable="false" />
-		<span class="app-name">Reach</span>
+		<span class="app-name">CoreOps</span>
 		<span class="app-version">v{__APP_VERSION__}</span>
 		<button class="settings-btn" onclick={openSettings} aria-label={t('titlebar.open_settings')}>
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">

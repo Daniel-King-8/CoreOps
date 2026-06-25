@@ -1,5 +1,5 @@
 {
-  "app.name": "Reach",
+  "app.name": "CoreOps",
   "app.version": "v{{version}}",
 
   "sidebar.sessions": "Sessions",
@@ -240,7 +240,7 @@
   "vault.vault_created_toast": "Coffre cree",
 
   "vault.import_backup": "Importer une sauvegarde",
-  "vault.import_backup_desc": "Restaurez vos donnees Reach depuis un fichier de sauvegarde chiffre.",
+  "vault.import_backup_desc": "Restaurez vos donnees CoreOps depuis un fichier de sauvegarde chiffre.",
   "vault.select_backup_file": "Selectionner le fichier de sauvegarde",
   "vault.export_password": "Mot de passe d'exportation",
   "vault.verifying": "Verification...",
@@ -381,7 +381,7 @@
   "settings.minimize_to_tray": "Reduire dans la zone de notification",
   "settings.tray_desc": "Continuer a fonctionner dans la zone de notification lorsque la fenetre est fermee",
   "settings.start_with_system": "Demarrer avec le systeme",
-  "settings.system_startup_desc": "Lancer Reach automatiquement a la connexion",
+  "settings.system_startup_desc": "Lancer CoreOps automatiquement a la connexion",
   "settings.font_size_desc": "Taille du texte du terminal ({{size}}px)",
   "settings.font_desc": "Police utilisee dans l'emulateur de terminal",
 
@@ -480,7 +480,7 @@
   "ai_settings.no_models": "Aucun modele charge. Validez votre cle API pour charger les modeles disponibles.",
   "ai_settings.no_match": "Aucun modele ne correspond a votre recherche.",
 
-  "updater.available": "Reach v{{version}} est disponible",
+  "updater.available": "CoreOps v{{version}} est disponible",
   "updater.installing": "Installation...",
   "updater.update_now": "Mettre a jour maintenant",
   "updater.later": "Plus tard",
@@ -516,7 +516,7 @@
   "common.clear": "Effacer",
   "common.dismiss": "Ignorer la notification",
 
-  "setup.welcome_title": "Bienvenue sur Reach",
+  "setup.welcome_title": "Bienvenue sur CoreOps",
   "setup.welcome_subtitle": "Configurons votre environnement",
   "setup.language_title": "Choisissez votre langue",
   "setup.language_subtitle": "Vous pourrez modifier cela plus tard dans les Parametres",
@@ -538,7 +538,7 @@
   "setup.back": "Retour",
   "setup.get_started": "Commencer",
   "setup.complete_title": "Tout est pret !",
-  "setup.complete_subtitle": "Reach est pret a etre utilise",
+  "setup.complete_subtitle": "CoreOps est pret a etre utilise",
 
   "toolchain.checking": "Recherche de {{tool}}...",
   "toolchain.installed": "{{tool}} {{version}}",
@@ -606,7 +606,7 @@
 
   "settings.plugins": "Plugins",
   "settings.plugins_dir": "Répertoire des plugins",
-  "settings.plugins_dir_desc": "Dossier où Reach recherche les plugins",
+  "settings.plugins_dir_desc": "Dossier où CoreOps recherche les plugins",
   "settings.plugins_browse": "Parcourir",
   "settings.plugins_browse_toast": "Répertoire des plugins mis à jour",
   "settings.plugins_installed": "Plugins installés",

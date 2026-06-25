@@ -1,5 +1,5 @@
 {
-  "app.name": "Reach",
+  "app.name": "CoreOps",
   "app.version": "v{{version}}",
 
   "sidebar.sessions": "Sitzungen",
@@ -381,7 +381,7 @@
   "settings.minimize_to_tray": "In den Infobereich minimieren",
   "settings.tray_desc": "Im Infobereich weiterlaufen, wenn das Fenster geschlossen wird",
   "settings.start_with_system": "Mit dem System starten",
-  "settings.system_startup_desc": "Reach automatisch beim Anmelden starten",
+  "settings.system_startup_desc": "CoreOps automatisch beim Anmelden starten",
   "settings.font_size_desc": "Terminal-Textgröße ({{size}}px)",
   "settings.font_desc": "Schriftart, die im Terminal-Emulator verwendet wird",
 
@@ -480,7 +480,7 @@
   "ai_settings.no_models": "Keine Modelle geladen. Überprüfe deinen API-Schlüssel, um verfügbare Modelle zu laden.",
   "ai_settings.no_match": "Keine Modelle entsprechen deiner Suche.",
 
-  "updater.available": "Reach v{{version}} ist verfügbar",
+  "updater.available": "CoreOps v{{version}} ist verfügbar",
   "updater.installing": "Wird installiert...",
   "updater.update_now": "Jetzt aktualisieren",
   "updater.later": "Später",
@@ -538,7 +538,7 @@
   "setup.back": "Zurück",
   "setup.get_started": "Loslegen",
   "setup.complete_title": "Alles bereit!",
-  "setup.complete_subtitle": "Reach ist einsatzbereit",
+  "setup.complete_subtitle": "CoreOps ist einsatzbereit",
 
   "toolchain.checking": "Suche nach {{tool}}...",
   "toolchain.installed": "{{tool}} {{version}}",
@@ -606,7 +606,7 @@
 
   "settings.plugins": "Plugins",
   "settings.plugins_dir": "Plugin-Verzeichnis",
-  "settings.plugins_dir_desc": "Ordner, in dem Reach nach Plugins sucht",
+  "settings.plugins_dir_desc": "Ordner, in dem CoreOps nach Plugins sucht",
   "settings.plugins_browse": "Durchsuchen",
   "settings.plugins_browse_toast": "Plugin-Verzeichnis aktualisiert",
   "settings.plugins_installed": "Installierte Plugins",

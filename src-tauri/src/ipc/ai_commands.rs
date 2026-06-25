@@ -115,6 +115,7 @@ pub async fn ai_chat(request: AiChatRequest) -> Result<String, String> {
 #[serde(rename_all = "camelCase")]
 pub struct AiFetchModelsRequest {
     pub api_key: String,
+    pub base_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,8 +160,9 @@ pub async fn ai_fetch_models(request: AiFetchModelsRequest) -> Result<Vec<ModelI
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
+    let models_url = format!("{}/models", request.base_url);
     let res = client
-        .get("https://openrouter.ai/api/v1/models")
+        .get(&models_url)
         .header("Authorization", format!("Bearer {}", request.api_key))
         .send()
         .await

@@ -1,5 +1,5 @@
 {
-  "app.name": "Reach",
+  "app.name": "CoreOps",
   "app.version": "v{{version}}",
 
   "sidebar.sessions": "Сесии",
@@ -240,7 +240,7 @@
   "vault.vault_created_toast": "Трезорът е създаден",
 
   "vault.import_backup": "Импортирай резервно копие",
-  "vault.import_backup_desc": "Възстановете вашите данни от Reach от криптиран файл с резервно копие.",
+  "vault.import_backup_desc": "Възстановете вашите данни от CoreOps от криптиран файл с резервно копие.",
   "vault.select_backup_file": "Изберете файл с резервно копие",
   "vault.export_password": "Парола за експорт",
   "vault.verifying": "Проверка...",
@@ -381,7 +381,7 @@
   "settings.minimize_to_tray": "Минимизирай в системния трей",
   "settings.tray_desc": "Продължи работа в системния трей при затваряне на прозореца",
   "settings.start_with_system": "Стартирай със системата",
-  "settings.system_startup_desc": "Стартирай Reach автоматично при влизане в системата",
+  "settings.system_startup_desc": "Стартирай CoreOps автоматично при влизане в системата",
   "settings.font_size_desc": "Размер на текста в терминала ({{size}}px)",
   "settings.font_desc": "Шрифт, използван в емулатора на терминала",
 
@@ -480,7 +480,7 @@
   "ai_settings.no_models": "Няма заредени модели. Валидирайте вашия API ключ, за да заредите наличните модели.",
   "ai_settings.no_match": "Няма модели, отговарящи на вашето търсене.",
 
-  "updater.available": "Reach v{{version}} е наличен",
+  "updater.available": "CoreOps v{{version}} е наличен",
   "updater.installing": "Инсталиране...",
   "updater.update_now": "Обнови сега",
   "updater.later": "По-късно",
@@ -516,7 +516,7 @@
   "common.clear": "Изчистване",
   "common.dismiss": "Отхвърли известието",
 
-  "setup.welcome_title": "Добре дошли в Reach",
+  "setup.welcome_title": "Добре дошли в CoreOps",
   "setup.welcome_subtitle": "Нека ви настроим",
   "setup.language_title": "Изберете вашия език",
   "setup.language_subtitle": "Можете да промените това по-късно в Настройки",
@@ -538,7 +538,7 @@
   "setup.back": "Назад",
   "setup.get_started": "Започнете",
   "setup.complete_title": "Всичко е готово!",
-  "setup.complete_subtitle": "Reach е готов за използване",
+  "setup.complete_subtitle": "CoreOps е готов за използване",
 
   "toolchain.checking": "Търсене на {{tool}}...",
   "toolchain.installed": "{{tool}} {{version}}",
@@ -606,7 +606,7 @@
 
   "settings.plugins": "Плъгини",
   "settings.plugins_dir": "Директория за плъгини",
-  "settings.plugins_dir_desc": "Папка, в която Reach търси плъгини",
+  "settings.plugins_dir_desc": "Папка, в която CoreOps търси плъгини",
   "settings.plugins_browse": "Преглед",
   "settings.plugins_browse_toast": "Директорията за плъгини е обновена",
   "settings.plugins_installed": "Инсталирани плъгини",

@@ -11,6 +11,7 @@
 	import { addToast } from '$lib/state/toasts.svelte';
 	import { t } from '$lib/state/i18n.svelte';
 	import { untrack } from 'svelte';
+	import { flip } from 'svelte/animate';
 	import { vaultState, checkState, initIdentity, refreshVaults, importIdentity } from '$lib/state/vault.svelte';
 
 	let showQuickConnect = $state(false);
@@ -127,45 +128,127 @@
 	}
 
 	// Drag & drop via pointer events (HTML5 DnD doesn't work in Tauri WebView2 on Windows)
-	let dragSession = $state<SessionConfig | undefined>();
+		let dragSession = $state<SessionConfig | undefined>();
 	let dropTarget = $state<string | null | undefined>();
 	let dragging = $state(false);
-
+	let dragPosition = $state({ x: 0, y: 0 });
+	let handleDragMove: ((e: PointerEvent) => void) | undefined = $state();
+	
 	function handleDragStart(e: PointerEvent, session: SessionConfig): void {
+		e.preventDefault();
+		(e.target as HTMLElement).setPointerCapture(e.pointerId);
 		dragSession = session;
 		dragging = true;
-		const onMove = (me: PointerEvent) => {
+		dragPosition = { x: e.clientX, y: e.clientY };
+	
+		handleDragMove = (me: PointerEvent) => {
 			if (!dragSession) return;
-			// Find drop target by checking which folder header we're over
+			dragPosition = { x: me.clientX, y: me.clientY };
 			const el = document.elementFromPoint(me.clientX, me.clientY);
 			if (el) {
-				const folderEl = el.closest('[data-folder-id]') as HTMLElement | null;
+				const folderEl = el.closest("[data-folder-id]") as HTMLElement | null;
 				if (folderEl) {
-					dropTarget = folderEl.dataset.folderId === '__ungrouped__' ? null : folderEl.dataset.folderId!;
+					dropTarget = folderEl.dataset.folderId === "__ungrouped__" ? null : folderEl.dataset.folderId;
 				} else {
 					dropTarget = undefined;
 				}
 			}
 		};
-		const onUp = async () => {
-			window.removeEventListener('pointermove', onMove);
-			window.removeEventListener('pointerup', onUp);
-			const session = dragSession;
-			const target = dropTarget;
-			dragSession = undefined;
-			dropTarget = undefined;
-			dragging = false;
-			if (session && target !== undefined && session.folder_id !== target) {
-				try {
-					await sessionUpdate({ ...session, folder_id: target });
-					await loadSessions();
-				} catch (err) {
-					addToast(String(err), 'error');
-				}
+	
+		window.addEventListener("pointermove", handleDragMove);
+		window.addEventListener("pointerup", handleDragEnd);
+		window.addEventListener("pointercancel", handleDragEnd);
+	}
+	
+	async function handleDragEnd(e: PointerEvent): Promise<void> {
+		window.removeEventListener("pointermove", handleDragMove!);
+		window.removeEventListener("pointerup", handleDragEnd);
+		window.removeEventListener("pointercancel", handleDragEnd);
+
+		const target = e.target as HTMLElement;
+		if (target.hasPointerCapture(e.pointerId)) {
+			target.releasePointerCapture(e.pointerId);
+		}
+
+		const draggedSession = dragSession;
+		if (!draggedSession) { resetDragState(); return; }
+
+		try {
+			const dropEl = document.elementFromPoint(e.clientX, e.clientY);
+			if (!dropEl) { resetDragState(); return; }
+
+			// ── 优先路径：松手落在某张会话卡片上 ──────────────────────────────
+			const cardEl = dropEl.closest('[data-session-id]') as HTMLElement | null;
+			if (cardEl) {
+				const targetId = cardEl.dataset.sessionId;
+				if (targetId === draggedSession.id) { resetDragState(); return; }
+
+				const oldIdx = sessions.findIndex(s => s.id === draggedSession.id);
+				const targetIdx = sessions.findIndex(s => s.id === targetId);
+				if (oldIdx === -1 || targetIdx === -1) { resetDragState(); return; }
+
+				const rect = cardEl.getBoundingClientRect();
+				const isAfter = e.clientY > (rect.top + rect.height / 2);
+				let newIdx = isAfter ? targetIdx + 1 : targetIdx;
+
+				const newFolderId = sessions[targetIdx].folder_id;
+				const folderChanged = newFolderId !== draggedSession.folder_id;
+
+				const [moved] = sessions.splice(oldIdx, 1);
+				moved.folder_id = newFolderId;
+				if (newIdx > oldIdx) newIdx -= 1;
+				sessions.splice(newIdx, 0, moved);
+				sessions = [...sessions];
+
+				if (folderChanged) await sessionUpdate(moved);
+				return;
 			}
-		};
-		window.addEventListener('pointermove', onMove);
-		window.addEventListener('pointerup', onUp);
+
+			// ── 次级路径：松手落在文件夹 header 或文件夹空白区域上 ─────────────
+			const folderEl = dropEl.closest('[data-folder-id]') as HTMLElement | null;
+			if (folderEl) {
+				const raw = folderEl.dataset.folderId;
+				// __ungrouped__ 代表根级别（无文件夹）
+				const targetFolderId = (raw === '__ungrouped__' ? null : raw) ?? null;
+
+				// 已在同一文件夹中 → 取消
+				if (targetFolderId === draggedSession.folder_id) { resetDragState(); return; }
+
+				const oldIdx = sessions.findIndex(s => s.id === draggedSession.id);
+				if (oldIdx === -1) { resetDragState(); return; }
+
+				const [moved] = sessions.splice(oldIdx, 1);
+				moved.folder_id = targetFolderId;
+
+				// 找到目标文件夹最后一个成员，插到其后；若文件夹为空则追加到末尾
+				const lastInFolder = [...sessions].reverse().find(s => s.folder_id === targetFolderId);
+				if (lastInFolder) {
+					const insertAfter = sessions.findIndex(s => s.id === lastInFolder.id);
+					sessions.splice(insertAfter + 1, 0, moved);
+				} else {
+					sessions.push(moved);
+				}
+
+				sessions = [...sessions];
+				await sessionUpdate(moved);
+				return;
+			}
+
+			// 落在无意义区域 → 取消
+		} catch (err) {
+			addToast(String(err), "error");
+			await loadSessions();
+		} finally {
+			resetDragState();
+		}
+	}
+	
+	function resetDragState(): void {
+		dragging = false;
+		dragSession = undefined;
+		dropTarget = undefined;
+		dragPosition = { x: 0, y: 0 };
+		handleDragMove = undefined;
 	}
 
 	// Right-click context menu
@@ -675,6 +758,24 @@
 					</div>
 					{#if !collapsedFolders.has(group.folder.id)}
 						{#each group.sessions as session (session.id)}
+							<div class="folder-session" animate:flip={{duration: 250}} data-session-id={session.id}>
+								{#if deleteConfirm === session.id}
+									<div class="delete-confirm">
+										<span class="delete-confirm-text">{t('session.delete_confirm', { name: session.name })}</span>
+										<button class="delete-confirm-btn" onclick={() => handleDelete(session)}>{t('common.confirm')}</button>
+										<button class="delete-cancel-btn" onclick={() => (deleteConfirm = null)}>{t('common.cancel')}</button>
+									</div>
+								{:else}
+									<div class="session-card-wrapper">
+										<SessionCard {session} onconnect={() => handleConnect(session)} onedit={() => handleEdit(session)} ondelete={() => handleDelete(session)} oncontextmenu={(e) => openSessionContextMenu(e, session)} ondragstart={(e) => handleDragStart(e, session)} ondragend={() => {}} />
+									</div>
+								{/if}
+							</div>
+						{/each}
+					{/if}
+				{:else}
+					{#each group.sessions as session (session.id)}
+						<div animate:flip={{duration: 250}} data-session-id={session.id}>
 							{#if deleteConfirm === session.id}
 								<div class="delete-confirm">
 									<span class="delete-confirm-text">{t('session.delete_confirm', { name: session.name })}</span>
@@ -682,23 +783,11 @@
 									<button class="delete-cancel-btn" onclick={() => (deleteConfirm = null)}>{t('common.cancel')}</button>
 								</div>
 							{:else}
-								<div class="folder-session">
+								<div class="session-card-wrapper">
 									<SessionCard {session} onconnect={() => handleConnect(session)} onedit={() => handleEdit(session)} ondelete={() => handleDelete(session)} oncontextmenu={(e) => openSessionContextMenu(e, session)} ondragstart={(e) => handleDragStart(e, session)} ondragend={() => {}} />
 								</div>
 							{/if}
-						{/each}
-					{/if}
-				{:else}
-					{#each group.sessions as session (session.id)}
-						{#if deleteConfirm === session.id}
-							<div class="delete-confirm">
-								<span class="delete-confirm-text">{t('session.delete_confirm', { name: session.name })}</span>
-								<button class="delete-confirm-btn" onclick={() => handleDelete(session)}>{t('common.confirm')}</button>
-								<button class="delete-cancel-btn" onclick={() => (deleteConfirm = null)}>{t('common.cancel')}</button>
-							</div>
-						{:else}
-							<SessionCard {session} onconnect={() => handleConnect(session)} onedit={() => handleEdit(session)} ondelete={() => handleDelete(session)} oncontextmenu={(e) => openSessionContextMenu(e, session)} ondragstart={(e) => handleDragStart(e, session)} ondragend={() => {}} />
-						{/if}
+						</div>
 					{/each}
 				{/if}
 			{/each}
@@ -1524,5 +1613,20 @@
 	.init-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+	.session-card-wrapper {
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+		background: var(--color-bg-primary);
+		padding: 2px;
+		transition: border-color 150ms ease, box-shadow 150ms ease;
+	}
+	.session-card-wrapper:hover {
+		border-color: var(--color-accent);
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+	}
+	.folder-session.dragging {
+		opacity: 0.08 !important;
+		pointer-events: none;
 	}
 </style>

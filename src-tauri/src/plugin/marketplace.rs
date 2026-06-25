@@ -13,6 +13,9 @@ use crate::plugin::schema::PluginPermission;
 pub const DEFAULT_INDEX_URL: &str =
     "https://raw.githubusercontent.com/alexandrosnt/reach-plugins-registry/main/plugins.json";
 
+// 🔧 如果你没有自己的 registry，在前端调用以下命令即可设置你自己的 URL：
+//    await invoke('marketplace_set_url', { url: 'https://your-registry/plugins.json' })
+
 /// Marketplace download client — separate from the per-plugin HTTP client so
 /// we can give it a longer timeout suited for release-zip downloads.
 fn download_client() -> &'static reqwest::Client {

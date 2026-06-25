@@ -27,7 +27,9 @@ use uuid::Uuid;
 /// List all saved tofu projects.
 #[tauri::command]
 pub async fn tofu_list_projects(state: State<'_, AppState>) -> Result<Vec<TofuProject>, String> {
+    tracing::info!("tofu_list_projects: command received");
     let mut tofu_mgr = state.tofu_project_manager.lock().await;
+    tracing::info!("tofu_list_projects: project manager locked");
     let mut vault_mgr = state.vault_manager.lock().await;
     tofu_mgr.ensure_loaded(&mut vault_mgr).await?;
     Ok(tofu_mgr.list_projects())

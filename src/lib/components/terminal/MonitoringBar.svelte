@@ -39,7 +39,6 @@
 		return t('monitoring.n_users', { count: stats.users.length });
 	});
 
-	// Format user entries for the tooltip: "root@pts/0 (you)" or "deploy@pts/1"
 	let usersList = $derived.by(() => {
 		if (!stats) return [];
 		return stats.users.map((entry) => {
@@ -149,7 +148,8 @@
 		background-color: var(--color-bg-secondary);
 		border-top: 1px solid var(--color-border);
 		font-family: var(--font-sans);
-		overflow: visible;
+		overflow: hidden;
+		flex-shrink: 0;
 	}
 
 	.gauge {
@@ -158,6 +158,7 @@
 		align-items: center;
 		gap: 6px;
 		min-width: 0;
+		flex-shrink: 0;
 	}
 
 	.gauge-label {

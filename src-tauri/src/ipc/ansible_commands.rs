@@ -12,7 +12,9 @@ use crate::state::AppState;
 pub async fn ansible_list_projects(
     state: State<'_, AppState>,
 ) -> Result<Vec<AnsibleProject>, String> {
+    tracing::info!("ansible_list_projects: command received");
     let mut mgr = state.ansible_project_manager.lock().await;
+    tracing::info!("ansible_list_projects: project manager locked");
     let mut vault_mgr = state.vault_manager.lock().await;
     mgr.ensure_loaded(&mut vault_mgr).await?;
     Ok(mgr.list_projects())

@@ -11,6 +11,7 @@
 	import { loadSnippets } from '$lib/state/snippets.svelte';
 	import { vaultState } from '$lib/state/vault.svelte';
 	import { onMount } from 'svelte';
+	import { listen } from '@tauri-apps/api/event';
 
 	let { children }: { children: Snippet } = $props();
 
@@ -25,8 +26,7 @@
 		startupUpdateCheck();
 		startPeriodicChecks();
 
-		// Dismiss the preloader after a minimum display time so the
-		// splash screen is actually visible during startup.
+		// Dismiss the preloader
 		const preloader = document.getElementById('preloader');
 		if (preloader) {
 			setTimeout(() => {
@@ -34,6 +34,14 @@
 				setTimeout(() => preloader.remove(), 500);
 			}, 800);
 		}
+
+		// ── 调试日志：捕获 Rust 后端输出事件 ──
+		const unlistenAnsible = listen<unknown>('ansible-output', (e) => {
+			console.log('[DEBUG] Ansible output event:', JSON.stringify(e.payload));
+		});
+		const unlistenTofu = listen<unknown>('tofu-output', (e) => {
+			console.log('[DEBUG] Tofu output event:', JSON.stringify(e.payload));
+		});
 
 		return () => {
 			cleanupShortcuts();
@@ -65,7 +73,7 @@
 				const link = document.createElement('link');
 				link.id = id;
 				link.rel = 'stylesheet';
-				link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(family)}:wght@400;700&display=swap`;
+				link.href = `https://fonts.googleapis.com/css2?=${encodeURIComponent(family)}:wght@400;700&display=swap`;
 				document.head.appendChild(link);
 			}
 		}

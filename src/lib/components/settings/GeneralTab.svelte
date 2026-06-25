@@ -10,6 +10,7 @@
 
 	const languageOptions = [
 		{ label: 'English', value: 'en' },
+		{ label: '中文 (Chinese)', value: 'zh' },
 		{ label: 'Deutsch', value: 'de' },
 		{ label: 'Français', value: 'fr' },
 		{ label: 'Ελληνικά', value: 'el' },

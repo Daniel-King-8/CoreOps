@@ -137,7 +137,7 @@ pub fn build_command_args(request: &AnsibleCommandRequest) -> (String, Vec<Strin
 }
 
 /// Execute an Ansible command locally, streaming output via Tauri events.
-/// On Windows, automatically routes through WSL if the binary isn't available natively.
+/// On Windows, tries: native binary → WSL → error.
 pub async fn run_local(
     working_dir: &str,
     binary: &str,
@@ -147,18 +147,43 @@ pub async fn run_local(
 ) -> Result<i32, String> {
     let event_name = format!("ansible-output-{}", run_id);
 
-    // Determine if we should run through WSL
-    let use_wsl = should_use_wsl(binary);
+    // ── 防御性检查链 ──
+    // Windows: 优先检查本机二进制，其次 WSL，都没有则立即报错
+    #[cfg(windows)]
+    let use_wsl = {
+        if native_binary_available(binary) {
+            false
+        } else if should_use_wsl(binary) {
+            true
+        } else {
+            let msg = format!(
+                "未检测到工具 [{}]。请确认 Ansible 已安装且路径正确，或手动安装。Windows 用户可通过 WSL 安装。",
+                binary
+            );
+            emit_done(&event_name, run_id, &msg, 1, app_handle);
+            return Err(msg);
+        }
+    };
 
+    #[cfg(not(windows))]
+    let use_wsl = false;
+
+    // ── 非 Windows / 本机执行 ──
+    #[cfg(not(windows))]
+    {
+        if which::which(binary).is_err() {
+            let msg = format!(
+                "未检测到工具 [{}]。请确认 Ansible 已安装且路径正确。",
+                binary
+            );
+            emit_done(&event_name, run_id, &msg, 1, app_handle);
+            return Err(msg);
+        }
+    }
+
+    // ── 执行 ──
     let mut child = if use_wsl {
-        // Run through WSL: wsl.exe -- <binary> <args...>
         let wsl_dir = windows_to_wsl_path(working_dir);
-        let mut wsl_args = vec![
-            "--".to_string(),
-            "bash".to_string(),
-            "-c".to_string(),
-        ];
-        // Build single command string: cd <dir> && ANSIBLE_FORCE_COLOR=0 ANSIBLE_NOCOLOR=1 <binary> <args>
         let escaped_args: Vec<String> = args.iter().map(|a| shell_escape(a)).collect();
         let cmd_str = format!(
             "cd {} && ANSIBLE_FORCE_COLOR=0 ANSIBLE_NOCOLOR=1 {} {}",
@@ -166,7 +191,6 @@ pub async fn run_local(
             binary,
             escaped_args.join(" ")
         );
-        wsl_args.push(cmd_str);
 
         let _ = app_handle.emit(
             &event_name,
@@ -180,28 +204,13 @@ pub async fn run_local(
         );
 
         silent_async_command("wsl.exe")
-            .args(&wsl_args)
+            .args(["--", "bash", "-c", &cmd_str])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
             .spawn()
-            .map_err(|e| format!("Failed to spawn wsl.exe: {}", e))?
+            .map_err(|e| format!("无法启动 wsl.exe: {}", e))?
     } else {
-        // Check if the binary exists natively
-        if which::which(binary).is_err() {
-            let _ = app_handle.emit(
-                &event_name,
-                AnsibleCommandEvent {
-                    run_id: run_id.to_string(),
-                    stream: "stderr".to_string(),
-                    line: format!("{} not found. Please install Ansible first.", binary),
-                    done: true,
-                    exit_code: Some(1),
-                },
-            );
-            return Err(format!("{} not found", binary));
-        }
-
         silent_async_command(binary)
             .args(args)
             .current_dir(working_dir)
@@ -211,7 +220,7 @@ pub async fn run_local(
             .env("ANSIBLE_FORCE_COLOR", "0")
             .env("ANSIBLE_NOCOLOR", "1")
             .spawn()
-            .map_err(|e| format!("Failed to spawn {}: {}", binary, e))?
+            .map_err(|e| format!("无法启动 {}: {}", binary, e))?
     };
 
     let stdout = child.stdout.take();
@@ -289,24 +298,62 @@ pub async fn run_local(
     Ok(exit_code)
 }
 
-/// Determine if we should run ansible through WSL.
-/// On Windows, always prefer WSL since native Ansible is broken on Windows
-/// (os.get_blocking / OSError). Only runs natively on non-Windows platforms.
+/// On Windows, check if WSL is actually available and the ansible tool
+/// exists inside it. Uses a 3-second timeout to prevent hanging.
+/// Returns false on any failure (no WSL, tool missing, timeout).
 fn should_use_wsl(binary: &str) -> bool {
     #[cfg(not(windows))]
     { let _ = binary; return false; }
 
     #[cfg(windows)]
     {
-        // On Windows, always prefer WSL for ansible commands since
-        // native ansible doesn't work (os.get_blocking error).
-        // Use login shell so ~/.local/bin is in PATH.
-        silent_command("wsl.exe")
-            .args(["--", "bash", "-lc", &format!("which {} 2>/dev/null || command -v {} 2>/dev/null", binary, binary)])
-            .output()
-            .map(|out| out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
-            .unwrap_or(false)
+        // First check if wsl.exe even exists in PATH — fast early exit.
+        if which::which("wsl.exe").is_err() {
+            tracing::debug!("WSL not found in PATH, skipping WSL check for {}", binary);
+            return false;
+        }
+
+        // Run with a 3-second timeout so we don't hang if WSL is broken.
+        let mut cmd = silent_command("wsl.exe");
+        cmd.args(["--", "bash", "-lc", &format!("which {} 2>/dev/null", binary)]);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.stdin(std::process::Stdio::null());
+
+        // Spawn and wait with timeout via a separate thread.
+        // std::process::Command can't timeout natively, so we use a oneshot.
+        let Ok(mut child) = cmd.spawn() else {
+            return false;
+        };
+
+        let start = std::time::Instant::now();
+        const TIMEOUT_MS: u64 = 3000;
+
+        loop {
+            if start.elapsed().as_millis() as u64 > TIMEOUT_MS {
+                let _ = child.kill();
+                tracing::warn!("WSL check timed out after {}ms for {}", TIMEOUT_MS, binary);
+                return false;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        return true;
+                    }
+                    return false;
+                }
+                Ok(None) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => return false,
+            }
+        }
     }
+}
+
+/// Check if a binary is available natively on Windows (fast PATH lookup).
+fn native_binary_available(binary: &str) -> bool {
+    which::which(binary).is_ok()
 }
 
 /// Execute an Ansible command on a remote SSH connection, streaming output via Tauri events.
@@ -355,6 +402,27 @@ pub async fn run_remote(
     );
 
     Ok(exit_code)
+}
+
+/// Emit a final "done" event with the given message and exit code.
+/// Used by the defensive check chain to report errors to the frontend.
+fn emit_done(
+    event_name: &str,
+    run_id: &str,
+    msg: &str,
+    exit_code: i32,
+    app_handle: &tauri::AppHandle,
+) {
+    let _ = app_handle.emit(
+        event_name,
+        AnsibleCommandEvent {
+            run_id: run_id.to_string(),
+            stream: "stderr".to_string(),
+            line: msg.to_string(),
+            done: true,
+            exit_code: Some(exit_code),
+        },
+    );
 }
 
 /// Basic shell escaping for paths in remote commands.

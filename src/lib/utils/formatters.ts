@@ -1,5 +1,5 @@
 /**
- * Formatting utilities for the Reach app.
+ * Formatting utilities for the CoreOps app.
  */
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const;

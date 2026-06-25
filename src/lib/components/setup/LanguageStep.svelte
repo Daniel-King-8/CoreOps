@@ -13,6 +13,7 @@
 
 	const languages = [
 		{ code: 'en', name: 'English', subtitle: 'English' },
+		{ code: 'zh', name: '中文', subtitle: 'Chinese' },
 		{ code: 'de', name: 'Deutsch', subtitle: 'German' },
 		{ code: 'fr', name: 'Français', subtitle: 'French' },
 		{ code: 'el', name: 'Ελληνικά', subtitle: 'Greek' },
@@ -51,6 +52,10 @@
 						<path d="M0 0L60 40M60 0L0 40" stroke="#C8102E" stroke-width="4"/>
 						<path d="M30 0V40M0 20H60" stroke="#fff" stroke-width="10"/>
 						<path d="M30 0V40M0 20H60" stroke="#C8102E" stroke-width="6"/>
+					{:else if lang.code === 'zh'}
+						<!-- China -->
+						<rect width="60" height="40" fill="#DE2910"/>
+						<polygon points="15,8 17,14 23,14 18,18 20,24 15,21 10,24 12,18 7,14 13,14" fill="#FFDE00"/>
 					{:else if lang.code === 'de'}
 						<!-- Germany -->
 						<rect width="60" height="13.33" fill="#000"/>

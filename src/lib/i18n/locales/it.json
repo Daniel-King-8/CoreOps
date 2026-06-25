@@ -1,5 +1,5 @@
 {
-  "app.name": "Reach",
+  "app.name": "CoreOps",
   "app.version": "v{{version}}",
 
   "sidebar.sessions": "Sessioni",
@@ -240,7 +240,7 @@
   "vault.vault_created_toast": "Vault creato",
 
   "vault.import_backup": "Importa Backup",
-  "vault.import_backup_desc": "Ripristina i tuoi dati di Reach da un file di backup crittografato.",
+  "vault.import_backup_desc": "Ripristina i tuoi dati di CoreOps da un file di backup crittografato.",
   "vault.select_backup_file": "Seleziona File di Backup",
   "vault.export_password": "Password di Esportazione",
   "vault.verifying": "Verifica...",
@@ -381,7 +381,7 @@
   "settings.minimize_to_tray": "Riduci nell'Area di Notifica",
   "settings.tray_desc": "Continua l'esecuzione nell'area di notifica quando la finestra viene chiusa",
   "settings.start_with_system": "Avvia con il Sistema",
-  "settings.system_startup_desc": "Avvia Reach automaticamente all'accesso",
+  "settings.system_startup_desc": "Avvia CoreOps automaticamente all'accesso",
   "settings.font_size_desc": "Dimensione del testo nel terminale ({{size}}px)",
   "settings.font_desc": "Font utilizzato nell'emulatore di terminale",
 
@@ -480,7 +480,7 @@
   "ai_settings.no_models": "Nessun modello caricato. Valida la tua chiave API per caricare i modelli disponibili.",
   "ai_settings.no_match": "Nessun modello corrisponde alla tua ricerca.",
 
-  "updater.available": "Reach v{{version}} è disponibile",
+  "updater.available": "CoreOps v{{version}} è disponibile",
   "updater.installing": "Installazione...",
   "updater.update_now": "Aggiorna Ora",
   "updater.later": "Più Tardi",
@@ -538,7 +538,7 @@
   "setup.back": "Indietro",
   "setup.get_started": "Inizia",
   "setup.complete_title": "Tutto pronto!",
-  "setup.complete_subtitle": "Reach è pronto all'uso",
+  "setup.complete_subtitle": "CoreOps è pronto all'uso",
 
   "toolchain.checking": "Ricerca di {{tool}}...",
   "toolchain.installed": "{{tool}} {{version}}",
@@ -606,7 +606,7 @@
 
   "settings.plugins": "Plugin",
   "settings.plugins_dir": "Directory dei plugin",
-  "settings.plugins_dir_desc": "Cartella in cui Reach cerca i plugin",
+  "settings.plugins_dir_desc": "Cartella in cui CoreOps cerca i plugin",
   "settings.plugins_browse": "Sfoglia",
   "settings.plugins_browse_toast": "Directory dei plugin aggiornata",
   "settings.plugins_installed": "Plugin installati",

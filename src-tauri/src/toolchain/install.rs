@@ -95,7 +95,7 @@ $ErrorActionPreference = 'Stop'
 $toolsDir = '{}'
 $arch = if ([System.Environment]::Is64BitOperatingSystem) {{ 'amd64' }} else {{ '386' }}
 $apiUrl = 'https://api.github.com/repos/opentofu/opentofu/releases/latest'
-$headers = @{{ 'User-Agent' = 'Reach-App' }}
+$headers = @{{ 'User-Agent' = 'CoreOps-App' }}
 $release = Invoke-RestMethod -Uri $apiUrl -Headers $headers
 $tag = $release.tag_name -replace '^v',''
 $zipName = "tofu_{0}_windows_$arch.zip" -f $tag

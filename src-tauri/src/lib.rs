@@ -61,7 +61,7 @@ pub fn run() {
         )
         .init();
 
-    tracing::info!("Starting Reach application");
+    tracing::info!("Starting CoreOps application");
 
     // Work around WebKitGTK DMA-BUF protocol errors on Wayland (KDE Plasma, etc.)
     #[cfg(target_os = "linux")]
@@ -222,6 +222,7 @@ pub fn run() {
             // Toolchain commands
             toolchain_check,
             toolchain_install,
+            check_environment,
             // Ansible commands
             ansible_list_projects,
             ansible_create_project,
@@ -424,6 +425,7 @@ pub fn run() {
             // Toolchain commands
             toolchain_check,
             toolchain_install,
+            check_environment,
             // Ansible commands
             ansible_list_projects,
             ansible_create_project,
@@ -535,7 +537,7 @@ pub fn run() {
 
                 TrayIconBuilder::new()
                     .icon(icon)
-                    .tooltip("Reach")
+                    .tooltip("CoreOps")
                     .menu(&tray_menu)
                     .on_menu_event(|app_handle, event| {
                         match event.id().as_ref() {
@@ -684,5 +686,5 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running Reach application");
+        .expect("error while running CoreOps application");
 }

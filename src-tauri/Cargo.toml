@@ -1,8 +1,8 @@
 [package]
 name = "reach"
 version = "0.4.2"
-description = "Cross-platform SSH & Remote Management Tool"
-authors = ["Reach Contributors"]
+description = "CoreOps - Cross-platform SSH & Remote Management Tool"
+authors = ["CoreOps Contributors"]
 edition = "2021"
 license = "LicenseRef-Reach-SAL"
 

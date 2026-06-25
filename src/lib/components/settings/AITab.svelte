@@ -19,7 +19,6 @@
 	let savingApiKey = $state(false);
 	let apiKeyError = $state<string | null>(null);
 
-	// Load secure settings when vault is unlocked
 	$effect(() => {
 		if (!isLocked()) {
 			loadSecureAISettings();
@@ -37,6 +36,10 @@
 
 	async function onEnabledChange(checked: boolean) {
 		await updateAISetting('enabled', checked);
+	}
+
+	async function onApiUrlInput(e: Event & { currentTarget: HTMLInputElement }) {
+		await updateAISetting('apiUrl', e.currentTarget.value);
 	}
 
 	async function onApiKeyInput(e: Event & { currentTarget: HTMLInputElement }) {
@@ -76,7 +79,6 @@
 </script>
 
 <div class="tab-content">
-	<!-- Enable AI row -->
 	<div class="setting-row">
 		<div class="setting-info">
 			<span class="setting-label">{t('ai_settings.enable')}</span>
@@ -91,7 +93,24 @@
 		</div>
 	</div>
 
-	<!-- API Key section -->
+	<!-- API 接口地址 -->
+	<div class="ai-section" class:disabled-section={!aiSettings.enabled}>
+		<div class="api-key-section">
+			<span class="setting-label">{t('ai_settings.api_url')}</span>
+			<span class="setting-description">{t('ai_settings.api_url_desc')}</span>
+			<div class="api-key-row">
+				<Input
+					type="text"
+					value={aiSettings.apiUrl}
+					placeholder="https://api.deepseek.com/v1"
+					disabled={!aiSettings.enabled}
+					oninput={onApiUrlInput}
+				/>
+			</div>
+		</div>
+	</div>
+
+	<!-- API Key -->
 	<div class="ai-section" class:disabled-section={!aiSettings.enabled}>
 		<div class="api-key-section">
 			<span class="setting-label">{t('ai_settings.api_key')}</span>
@@ -100,7 +119,7 @@
 				<Input
 					type="password"
 					value={aiSettings.apiKey}
-					placeholder="sk-or-..."
+					placeholder="sk-..."
 					disabled={!aiSettings.enabled}
 					oninput={onApiKeyInput}
 				/>
@@ -134,7 +153,7 @@
 		</div>
 	</div>
 
-	<!-- Model Browser section -->
+	<!-- 模型列表 -->
 	<div class="ai-section" class:disabled-section={!aiSettings.enabled}>
 		<div class="section-header">
 			<span class="setting-label">{t('ai_settings.model_browser')}</span>
@@ -182,7 +201,6 @@
 		</div>
 	</div>
 
-	<!-- Selected model indicator -->
 	{#if aiSettings.selectedModel}
 		<div class="selected-indicator">
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -234,7 +252,6 @@
 		flex-shrink: 0;
 	}
 
-	/* AI sections with reduced opacity when disabled */
 	.ai-section {
 		transition: opacity var(--duration-default) var(--ease-default);
 	}
@@ -244,7 +261,6 @@
 		pointer-events: none;
 	}
 
-	/* API Key section — stacked layout */
 	.api-key-section {
 		display: flex;
 		flex-direction: column;
@@ -303,7 +319,6 @@
 		color: #ff453a;
 	}
 
-	/* Model Browser */
 	.section-header {
 		padding: 10px 0 6px;
 	}
@@ -415,7 +430,6 @@
 		margin-left: 12px;
 	}
 
-	/* Selected model indicator */
 	.selected-indicator {
 		display: flex;
 		align-items: center;

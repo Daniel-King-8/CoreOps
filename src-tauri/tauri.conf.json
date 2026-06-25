@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
-  "productName": "Reach",
+  "productName": "CoreOps",
   "version": "0.4.2",
   "identifier": "com.reach.desktop",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Reach",
+        "title": "CoreOps",
         "width": 1280,
         "height": 800,
         "minWidth": 900,

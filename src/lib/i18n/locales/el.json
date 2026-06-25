@@ -1,5 +1,5 @@
 {
-  "app.name": "Reach",
+  "app.name": "CoreOps",
   "app.version": "v{{version}}",
 
   "sidebar.sessions": "Συνεδρίες",
@@ -240,7 +240,7 @@
   "vault.vault_created_toast": "Το θησαυροφυλάκιο δημιουργήθηκε",
 
   "vault.import_backup": "Εισαγωγή Αντιγράφου Ασφαλείας",
-  "vault.import_backup_desc": "Αποκαταστήστε τα δεδομένα του Reach από ένα κρυπτογραφημένο αντίγραφο ασφαλείας.",
+  "vault.import_backup_desc": "Αποκαταστήστε τα δεδομένα του CoreOps από ένα κρυπτογραφημένο αντίγραφο ασφαλείας.",
   "vault.select_backup_file": "Επιλογή Αρχείου Αντιγράφου Ασφαλείας",
   "vault.export_password": "Κωδικός Εξαγωγής",
   "vault.verifying": "Επαλήθευση...",
@@ -381,7 +381,7 @@
   "settings.minimize_to_tray": "Ελαχιστοποίηση στο Δίσκο",
   "settings.tray_desc": "Συνέχιση λειτουργίας στο δίσκο συστήματος όταν κλείνει το παράθυρο",
   "settings.start_with_system": "Εκκίνηση με το Σύστημα",
-  "settings.system_startup_desc": "Αυτόματη εκκίνηση του Reach κατά τη σύνδεση",
+  "settings.system_startup_desc": "Αυτόματη εκκίνηση του CoreOps κατά τη σύνδεση",
   "settings.font_size_desc": "Μέγεθος κειμένου τερματικού ({{size}}px)",
   "settings.font_desc": "Γραμματοσειρά που χρησιμοποιείται στον εξομοιωτή τερματικού",
 
@@ -480,7 +480,7 @@
   "ai_settings.no_models": "Δεν φορτώθηκαν μοντέλα. Επικυρώστε το κλειδί API σας για φόρτωση διαθέσιμων μοντέλων.",
   "ai_settings.no_match": "Κανένα μοντέλο δεν ταιριάζει με την αναζήτησή σας.",
 
-  "updater.available": "Το Reach v{{version}} είναι διαθέσιμο",
+  "updater.available": "Το CoreOps v{{version}} είναι διαθέσιμο",
   "updater.installing": "Εγκατάσταση...",
   "updater.update_now": "Ενημέρωση Τώρα",
   "updater.later": "Αργότερα",
@@ -516,7 +516,7 @@
   "common.clear": "Εκκαθάριση",
   "common.dismiss": "Απόρριψη ειδοποίησης",
 
-  "setup.welcome_title": "Καλώς ήρθατε στο Reach",
+  "setup.welcome_title": "Καλώς ήρθατε στο CoreOps",
   "setup.welcome_subtitle": "Ας σας ρυθμίσουμε",
   "setup.language_title": "Επιλέξτε τη γλώσσα σας",
   "setup.language_subtitle": "Μπορείτε να το αλλάξετε αργότερα στις Ρυθμίσεις",
@@ -538,7 +538,7 @@
   "setup.back": "Πίσω",
   "setup.get_started": "Ξεκινήστε",
   "setup.complete_title": "Είστε έτοιμοι!",
-  "setup.complete_subtitle": "Το Reach είναι έτοιμο για χρήση",
+  "setup.complete_subtitle": "Το CoreOps είναι έτοιμο για χρήση",
 
   "toolchain.checking": "Αναζήτηση {{tool}}...",
   "toolchain.installed": "{{tool}} {{version}}",
@@ -606,7 +606,7 @@
 
   "settings.plugins": "Πρόσθετα",
   "settings.plugins_dir": "Κατάλογος πρόσθετων",
-  "settings.plugins_dir_desc": "Φάκελος στον οποίο το Reach αναζητά πρόσθετα",
+  "settings.plugins_dir_desc": "Φάκελος στον οποίο το CoreOps αναζητά πρόσθετα",
   "settings.plugins_browse": "Αναζήτηση",
   "settings.plugins_browse_toast": "Ο κατάλογος πρόσθετων ενημερώθηκε",
   "settings.plugins_installed": "Εγκατεστημένα πρόσθετα",
