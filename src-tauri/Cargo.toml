@@ -10,6 +10,10 @@ license = "LicenseRef-Reach-SAL"
 name = "coreops_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[[bin]]
+name = "CoreOps"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
