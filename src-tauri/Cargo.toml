@@ -1,5 +1,5 @@
 [package]
-name = "reach"
+name = "coreops"
 version = "0.4.2"
 description = "CoreOps - Cross-platform SSH & Remote Management Tool"
 authors = ["CoreOps Contributors"]
@@ -7,7 +7,7 @@ edition = "2021"
 license = "LicenseRef-Reach-SAL"
 
 [lib]
-name = "reach_lib"
+name = "coreops_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]

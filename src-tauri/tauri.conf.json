@@ -37,6 +37,7 @@
   },
   "bundle": {
     "active": true,
+    "mainBinaryName": "CoreOps",
     "targets": "all",
     "createUpdaterArtifacts": "v1Compatible",
     "icon": [
