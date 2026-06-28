@@ -428,13 +428,18 @@
 				onTitleChange?.(title);
 			});
 
-			// Right-click pastes from clipboard
+			// Right-click: copy if text is selected, otherwise paste from clipboard
 			const termEl = containerEl!;
 			function onContextMenu(e: MouseEvent) {
 				e.preventDefault();
-				navigator.clipboard.readText().then((text) => {
-					if (text) term.paste(text);
-				});
+				if (term.hasSelection()) {
+					navigator.clipboard.writeText(term.getSelection());
+					term.clearSelection();
+				} else {
+					navigator.clipboard.readText().then((text) => {
+						if (text) term.paste(text);
+					});
+				}
 			}
 			termEl.addEventListener('contextmenu', onContextMenu);
 
