@@ -904,6 +904,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "coreops"
+version = "0.4.2"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "dirs 5.0.1",
+ "hkdf",
+ "keyring",
+ "libsql",
+ "mlua",
+ "portable-pty",
+ "rand 0.8.5",
+ "regex",
+ "reqwest 0.12.28",
+ "russh",
+ "russh-keys",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "serialport",
+ "sha2",
+ "ssh2-config",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-dialog",
+ "tauri-plugin-process",
+ "tauri-plugin-shell",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-updater",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-socks",
+ "toml 0.8.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "which 7.0.3",
+ "x25519-dalek",
+ "zeroize",
+ "zip 2.4.2",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4697,54 +4745,6 @@ name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
-
-[[package]]
-name = "reach"
-version = "0.4.2"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "argon2",
- "async-trait",
- "base64 0.22.1",
- "chacha20poly1305",
- "dirs 5.0.1",
- "hkdf",
- "keyring",
- "libsql",
- "mlua",
- "portable-pty",
- "rand 0.8.5",
- "regex",
- "reqwest 0.12.28",
- "russh",
- "russh-keys",
- "secrecy",
- "serde",
- "serde_json",
- "serialport",
- "sha2",
- "ssh2-config",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-dialog",
- "tauri-plugin-process",
- "tauri-plugin-shell",
- "tauri-plugin-single-instance",
- "tauri-plugin-updater",
- "thiserror 2.0.18",
- "tokio",
- "tokio-socks",
- "toml 0.8.2",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "which 7.0.3",
- "x25519-dalek",
- "zeroize",
- "zip 2.4.2",
-]
 
 [[package]]
 name = "redox_syscall"

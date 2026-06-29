@@ -309,7 +309,6 @@
 
 			if (event.ctrlKey && event.key === 'c' && term.hasSelection()) {
 				navigator.clipboard.writeText(term.getSelection());
-				term.clearSelection();
 				return false;
 			}
 
@@ -457,15 +456,6 @@
 				}
 			}
 			termEl.addEventListener('wheel', onWheel, { passive: false });
-
-			// Click to copy: if text is selected, clicking copies it
-			function onClick(e: MouseEvent) {
-				if (term.hasSelection()) {
-					navigator.clipboard.writeText(term.getSelection());
-					term.clearSelection();
-				}
-			}
-			termEl.addEventListener('click', onClick);
 
 			terminal = term;
 			fitAddon = fit;
