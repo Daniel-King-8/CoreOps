@@ -35,14 +35,6 @@
 			}, 800);
 		}
 
-		// ── 调试日志：捕获 Rust 后端输出事件 ──
-		const unlistenAnsible = listen<unknown>('ansible-output', (e) => {
-			console.log('[DEBUG] Ansible output event:', JSON.stringify(e.payload));
-		});
-		const unlistenTofu = listen<unknown>('tofu-output', (e) => {
-			console.log('[DEBUG] Tofu output event:', JSON.stringify(e.payload));
-		});
-
 		return () => {
 			cleanupShortcuts();
 			stopPeriodicChecks();
@@ -73,7 +65,7 @@
 				const link = document.createElement('link');
 				link.id = id;
 				link.rel = 'stylesheet';
-				link.href = `https://fonts.googleapis.com/css2?=${encodeURIComponent(family)}:wght@400;700&display=swap`;
+				link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(family)}:wght@400;700&display=swap`;
 				document.head.appendChild(link);
 			}
 		}

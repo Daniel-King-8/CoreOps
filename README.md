@@ -1,3 +1,7 @@
+<p align="right">
+  <a href="README_EN.md">English</a>
+</p>
+
 <p align="center">
   <img src="src-tauri/icons/128x128.png" alt="CoreOps" width="80" />
 </p>
@@ -11,7 +15,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/基于-Reach-0a84ff?style=flat-square" alt="Based on Reach" />
-  <img src="https://img.shields.io/badge/version-0.4.2-brightgreen?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-0.4.8-brightgreen?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-333?style=flat-square" alt="Platforms" />
   <img src="https://img.shields.io/badge/AI-DeepSeek%20%7C%20Qwen%20%7C%20OpenAI-blueviolet?style=flat-square" alt="AI Support" />
 </p>
@@ -139,7 +143,7 @@
 
 ```bash
 # 克隆本仓库
-git clone <this-repo-url>
+git clone https://github.com/Daniel-King-8/CoreOps.git
 cd CoreOps
 
 # 安装前端依赖
@@ -169,6 +173,18 @@ npm run tauri build
 **原项目地址：[https://github.com/alexandrosnt/Reach](https://github.com/alexandrosnt/Reach)**
 
 ---
+
+## 写在最后
+
+说实话，我并不是一名很厉害的程序员。因此这个项目难免存在不少不足之处，也会有一些 Bug，还望各位用户多多包涵。
+
+做这个项目的初衷很简单——**让自己的工作更顺手，也希望对有相似需求的朋友有所帮助**。能对大家有一点点用处，就已经很值得了。
+
+如果你在使用过程中遇到了 Bug、有功能上的建议、或者只是想聊聊，欢迎通过以下方式联系我：
+
+📮 **邮箱：[1007887927@qq.com](mailto:1007887927@qq.com)**
+
+每一条反馈我都会认真阅读，感谢你的支持与理解！
 
 > CoreOps 是完全为个人运维工作流定制的私有分支，不代表 Reach 官方立场。  
 > 如果你在寻找 SSH 客户端，也欢迎直接使用原版 Reach。

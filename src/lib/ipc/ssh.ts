@@ -76,3 +76,40 @@ export async function sshListConnections(): Promise<ConnectionInfo[]> {
 export async function sshDetectOs(connectionId: string): Promise<string> {
   return invoke<string>('ssh_detect_os', { connectionId });
 }
+
+/** Host-key verification prompt from the back-end. */
+export interface HostKeyPrompt {
+  promptId: string;
+  host: string;
+  port: number;
+  fingerprint: string;
+  keyType: string;
+  changed: boolean;
+  oldFingerprint?: string | null;
+}
+
+export async function sshHostkeyResponse(promptId: string, accept: boolean): Promise<void> {
+  return invoke('ssh_hostkey_response', { promptId, accept });
+}
+
+export type KeyFileKind = 'private_key' | 'public_key' | 'not_a_key' | 'not_found';
+
+export interface KeyCandidate {
+  path: string;
+  name: string;
+  algo?: string | null;
+}
+
+export interface KeyFileInfo {
+  path: string;
+  kind: KeyFileKind;
+  algo?: string | null;
+  comment?: string | null;
+  encrypted: boolean;
+  suggestedPrivateKey?: KeyCandidate | null;
+  siblingPrivateKeys: KeyCandidate[];
+}
+
+export async function inspectKeyFile(path: string): Promise<KeyFileInfo> {
+  return invoke<KeyFileInfo>('inspect_key_file', { path });
+}

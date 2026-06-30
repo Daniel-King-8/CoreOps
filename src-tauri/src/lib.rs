@@ -91,7 +91,8 @@ pub fn run() {
                 }
             }))
             .plugin(tauri_plugin_updater::Builder::new().build())
-            .plugin(tauri_plugin_autostart::init(
+            .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_autostart::init(
                 tauri_plugin_autostart::MacosLauncher::LaunchAgent,
                 None,
             ));
@@ -107,6 +108,8 @@ pub fn run() {
             ssh_resize,
             ssh_list_connections,
             ssh_detect_os,
+            ssh_hostkey_response,
+            inspect_key_file,
             // SSH Config commands
             sshconfig_list_hosts,
             sshconfig_resolve_host,
@@ -321,6 +324,8 @@ pub fn run() {
             ssh_list_connections,
             ssh_detect_os,
             // SSH Config commands
+            ssh_hostkey_response,
+            inspect_key_file,
             sshconfig_list_hosts,
             sshconfig_resolve_host,
             sshconfig_exists,

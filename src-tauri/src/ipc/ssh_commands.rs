@@ -231,3 +231,24 @@ pub async fn ssh_detect_os(
 
     Ok("linux".to_string())
 }
+
+/// Respond to a host-key verification prompt from the frontend.
+///
+/// Currently host keys are auto-accepted in check_server_key (TOFU model).
+/// This command exists so the frontend HostKeyDialog can call it without
+/// error; a future iteration will wire it into an interactive prompt flow.
+#[tauri::command]
+pub async fn ssh_hostkey_response(
+    prompt_id: String,
+    accept: bool,
+) -> Result<(), String> {
+    tracing::info!("ssh_hostkey_response: prompt_id={}, accept={}", prompt_id, accept);
+    Ok(())
+}
+
+/// Inspect an SSH key file and return classification info (private/public/not-a-key),
+/// algorithm, encryption status, and sibling key suggestions.
+#[tauri::command]
+pub async fn inspect_key_file(path: String) -> Result<crate::ssh::keyfile::KeyFileInfo, String> {
+    Ok(crate::ssh::keyfile::classify_path(&path))
+}

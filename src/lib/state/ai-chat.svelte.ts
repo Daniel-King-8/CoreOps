@@ -449,8 +449,9 @@ export async function executeCommand(
 
 	const terminal: TerminalInfo = { bufferId, tabType, connectionId };
 
+	const userMsgId = crypto.randomUUID();
 	messages.push({
-		id: crypto.randomUUID(),
+		id: userMsgId,
 		role: 'user',
 		content: `执行命令：\`${command}\`\n\n正在等待输出...`,
 		timestamp: Date.now()
@@ -465,8 +466,8 @@ export async function executeCommand(
 		const output = await captureCommandOutput(command, terminal);
 		if (cancelled) return;
 
-		const userMsgIdx = messages.length - 1;
-		messages[userMsgIdx].content = `已执行：\`${command}\`\n\n输出结果：\n\`\`\`\n${output}\n\`\`\``;
+		const userMsgIdx = messages.findIndex((m) => m.id === userMsgId);
+		if (userMsgIdx !== -1) messages[userMsgIdx].content = `已执行：\`${command}\`\n\n输出结果：\n\`\`\`\n${output}\n\`\`\``;
 
 		const assistantId = crypto.randomUUID();
 		messages.push({ id: assistantId, role: 'assistant', content: '', timestamp: Date.now() });
@@ -544,6 +545,7 @@ export async function executeCommand(
 		error = String(e);
 	} finally {
 		loading = false;
+		active = false;
 	}
 }
 
@@ -603,5 +605,6 @@ export async function executeAllCommands(
 		error = String(e);
 	} finally {
 		loading = false;
+		active = false;
 	}
 }

@@ -13,7 +13,7 @@ use crate::state::ProxyConfig;
 /// Expand `~` and `~/` to the user's home directory. Cross-platform: works
 /// on Windows (resolves to %USERPROFILE%), macOS, and Linux. Leaves absolute
 /// paths and paths without leading `~` unchanged.
-fn expand_tilde(path: &str) -> PathBuf {
+pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     let trimmed = path.trim();
     if trimmed == "~" {
         return dirs::home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
@@ -1042,6 +1042,7 @@ async fn ssh_session_task(
 ) {
     let data_event = format!("ssh-data-{}", connection_id);
     let exit_event = format!("ssh-exit-{}", connection_id);
+    let mut exit_emitted = false;
 
     loop {
         tokio::select! {
@@ -1064,6 +1065,7 @@ async fn ssh_session_task(
                     Some(ChannelMsg::ExitStatus { exit_status }) => {
                         tracing::info!("SSH '{}' exited with status {}", connection_id, exit_status);
                         let _ = app_handle.emit(&exit_event, exit_status);
+                        exit_emitted = true;
                         break;
                     }
                     Some(ChannelMsg::Eof) => {
@@ -1100,8 +1102,10 @@ async fn ssh_session_task(
         }
     }
 
-    if let Err(e) = app_handle.emit(&exit_event, ()) {
-        tracing::error!("Failed to emit '{}': {}", exit_event, e);
+    if !exit_emitted {
+        if let Err(e) = app_handle.emit(&exit_event, ()) {
+            tracing::error!("Failed to emit '{}': {}", exit_event, e);
+        }
     }
     tracing::info!("SSH '{}' session task exiting", connection_id);
 }

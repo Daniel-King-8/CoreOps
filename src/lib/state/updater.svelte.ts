@@ -11,6 +11,7 @@ let startupBlocking = $state(false);
 let downloadAttempts = $state(0);
 let error = $state<string | null>(null);
 let dismissed = $state(false);
+let readyToRelaunch = $state(false);
 
 let periodicInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -25,7 +26,8 @@ export function getUpdaterState() {
 		get startupBlocking() { return startupBlocking; },
 		get downloadAttempts() { return downloadAttempts; },
 		get error() { return error; },
-		get dismissed() { return dismissed; }
+		get dismissed() { return dismissed; },
+		get readyToRelaunch() { return readyToRelaunch; }
 	};
 }
 
@@ -79,7 +81,8 @@ export async function downloadAndInstall(): Promise<void> {
 				}
 			} else if (event.event === 'Finished') {
 				downloading = false;
-				installing = true;
+				installing = false;
+				readyToRelaunch = true;
 			}
 		});
 
@@ -87,10 +90,24 @@ export async function downloadAndInstall(): Promise<void> {
 	} catch (e) {
 		downloading = false;
 		installing = false;
+		readyToRelaunch = false;
 		downloadAttempts++;
 		error = e instanceof Error ? e.message : String(e);
 		console.error('Download/install failed:', e);
 	}
+}
+
+export async function relaunchNow(): Promise<void> {
+	try {
+		await relaunch();
+	} catch (e) {
+		error = e instanceof Error ? e.message : String(e);
+		console.error('Relaunch failed:', e);
+	}
+}
+
+export function postponeRelaunch(): void {
+	readyToRelaunch = false;
 }
 
 export function dismissUpdate(): void {

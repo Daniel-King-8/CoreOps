@@ -7,6 +7,7 @@
 		onclose: () => void;
 		title?: string;
 		maxWidth?: string;
+		zIndex?: number;
 		children: Snippet;
 		actions?: Snippet;
 	}
@@ -16,6 +17,7 @@
 		onclose,
 		title = '',
 		maxWidth,
+		zIndex,
 		children,
 		actions
 	}: Props = $props();
@@ -49,6 +51,7 @@
 		class="backdrop glass"
 		onkeydown={() => {}}
 		onclick={onBackdropClick}
+		style:z-index={zIndex}
 	>
 		<div class="modal" role="dialog" aria-modal="true" aria-label={title || t('common.close_dialog')} style:max-width={maxWidth}>
 			{#if title}
