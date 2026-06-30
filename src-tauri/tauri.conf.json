@@ -29,10 +29,11 @@
   },
   "plugins": {
     "updater": {
+      "active": true,
       "endpoints": [
-        "https://github.com/alexandrosnt/Reach/releases/latest/download/latest.json"
+        "https://github.com/Daniel-King-8/CoreOps/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZBNTc1M0UwRjZCQ0NGM0E5CjRReU1hS21JcGd1U1d6NlJ1NUpCejFwTTVqS3V0NEdxWnNMa2c4aHRuS1lzRk5XclJ2TEc4ZzJ4NUNwS3hEbm9zRjl6ZzdhWkVzSjV6dG9oV0xKQU1nPQ=="
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlBMTQwQjI3OEZFQURCODgKUldTSTIrcVBKd3NVbWhoZkRnblNiRU9mWVQ1dEZoT21XbUkyVzVkWXdiZ3NUaWtWcDBlVGNBZ3UK"
     }
   },
   "bundle": {
