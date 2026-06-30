@@ -16,12 +16,16 @@ jobs:
         include:
           - platform: windows-latest
             args: ''
+            os_name: 'Windows'
           - platform: macos-latest
             args: '--target aarch64-apple-darwin'
+            os_name: 'macOS_ARM64'
           - platform: macos-latest
             args: '--target x86_64-apple-darwin'
+            os_name: 'macOS_Intel'
           - platform: ubuntu-22.04
             args: ''
+            os_name: 'Linux'
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -61,12 +65,150 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: 1
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'Reach ${{ github.ref_name }}'
-          releaseBody: 'See the assets to download and install.'
+          releaseName: 'CoreOps ${{ github.ref_name }}'
+          releaseBody: |
+            ## CoreOps ${{ github.ref_name }}
+
+            ### 📦 下载指南
+            | 系统 | 文件 |
+            |------|------|
+            | **Windows** | `.exe` 或 `.msi` |
+            | **macOS (Apple Silicon)** | `macOS_ARM64.dmg` |
+            | **macOS (Intel)** | `macOS_Intel.dmg` |
+            | **Linux** | `.deb` / `.rpm` / `.AppImage` |
+            | **Android** | `.apk` |
           releaseDraft: false
           prerelease: false
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
+
+      - name: Rename artifacts (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+
+          $assets = gh release view ${{ github.ref_name }} --json assets -q '.assets[].name'
+
+          foreach ($asset in $assets -split "`n") {
+            $newName = $asset
+            if ($asset -match "CoreOps.*x64-setup\.exe$") {
+              $newName = "CoreOps_${version}_Windows_x64_Setup.exe"
+            }
+            elseif ($asset -match "CoreOps.*x64-setup\.exe\.sig$") {
+              $newName = "CoreOps_${version}_Windows_x64_Setup.exe.sig"
+            }
+            elseif ($asset -match "CoreOps.*x64-setup\.nsis\.zip$") {
+              $newName = "CoreOps_${version}_Windows_x64_NSIS.zip"
+            }
+            elseif ($asset -match "CoreOps.*x64-setup\.nsis\.zip\.sig$") {
+              $newName = "CoreOps_${version}_Windows_x64_NSIS.zip.sig"
+            }
+            elseif ($asset -match "CoreOps.*x64.*\.msi$") {
+              $newName = "CoreOps_${version}_Windows_x64.msi"
+            }
+            elseif ($asset -match "CoreOps.*x64.*\.msi\.sig$") {
+              $newName = "CoreOps_${version}_Windows_x64.msi.sig"
+            }
+
+            if ($newName -ne $asset) {
+              Write-Host "Renaming: $asset -> $newName"
+              New-Item -ItemType Directory -Force -Path "./tmp_assets" | Out-Null
+              gh release download ${{ github.ref_name }} -p "$asset" -D "./tmp_assets"
+              gh release delete-asset ${{ github.ref_name }} "$asset" --yes
+              Rename-Item "./tmp_assets/$asset" "$newName"
+              gh release upload ${{ github.ref_name }} "./tmp_assets/$newName"
+            }
+          }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rename artifacts (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          OS_NAME="${{ matrix.os_name }}"
+
+          assets=$(gh release view ${{ github.ref_name }} --json assets -q '.assets[].name')
+
+          for asset in $assets; do
+            newName="$asset"
+
+            if [[ "$OS_NAME" == "macOS_ARM64" ]]; then
+              if [[ "$asset" == *"aarch64.dmg" && "$asset" != *".sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_ARM64.dmg"
+              elif [[ "$asset" == *"aarch64.dmg.sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_ARM64.dmg.sig"
+              elif [[ "$asset" == *"aarch64"*".app.tar.gz" && "$asset" != *".sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_ARM64.app.tar.gz"
+              elif [[ "$asset" == *"aarch64"*".app.tar.gz.sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_ARM64.app.tar.gz.sig"
+              fi
+            elif [[ "$OS_NAME" == "macOS_Intel" ]]; then
+              if [[ "$asset" == *"x64.dmg" && "$asset" != *".sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_Intel.dmg"
+              elif [[ "$asset" == *"x64.dmg.sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_Intel.dmg.sig"
+              elif [[ "$asset" == *"x64"*".app.tar.gz" && "$asset" != *".sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_Intel.app.tar.gz"
+              elif [[ "$asset" == *"x64"*".app.tar.gz.sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_Intel.app.tar.gz.sig"
+              fi
+            fi
+
+            if [ "$newName" != "$asset" ]; then
+              echo "Renaming: $asset -> $newName"
+              mkdir -p ./tmp_assets
+              gh release download ${{ github.ref_name }} -p "$asset" -D "./tmp_assets"
+              gh release delete-asset ${{ github.ref_name }} "$asset" --yes
+              mv "./tmp_assets/$asset" "./tmp_assets/$newName"
+              gh release upload ${{ github.ref_name }} "./tmp_assets/$newName"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rename artifacts (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+
+          assets=$(gh release view ${{ github.ref_name }} --json assets -q '.assets[].name')
+
+          for asset in $assets; do
+            newName="$asset"
+
+            if [[ "$asset" == *".AppImage" && "$asset" != *".sig" && "$asset" != *".tar.gz" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.AppImage"
+            elif [[ "$asset" == *".AppImage.sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.AppImage.sig"
+            elif [[ "$asset" == *".AppImage.tar.gz" && "$asset" != *".sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.AppImage.tar.gz"
+            elif [[ "$asset" == *".AppImage.tar.gz.sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.AppImage.tar.gz.sig"
+            elif [[ "$asset" == *".deb" && "$asset" != *".sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.deb"
+            elif [[ "$asset" == *".deb.sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.deb.sig"
+            elif [[ "$asset" == *".rpm" && "$asset" != *".sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.rpm"
+            elif [[ "$asset" == *".rpm.sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.rpm.sig"
+            fi
+
+            if [ "$newName" != "$asset" ]; then
+              echo "Renaming: $asset -> $newName"
+              mkdir -p ./tmp_assets
+              gh release download ${{ github.ref_name }} -p "$asset" -D "./tmp_assets"
+              gh release delete-asset ${{ github.ref_name }} "$asset" --yes
+              mv "./tmp_assets/$asset" "./tmp_assets/$newName"
+              gh release upload ${{ github.ref_name }} "./tmp_assets/$newName"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-release:
     needs: [build-desktop]
@@ -161,8 +303,18 @@ jobs:
             "$APK"
           ${BUILD_TOOLS}apksigner verify "$APK"
 
-      - name: Upload APK to release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+      - name: Rename and upload APK
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
+          cp "$APK" "CoreOps_${VERSION}_Android.apk"
+          gh release upload ${{ github.ref_name }} "CoreOps_${VERSION}_Android.apk" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove old APK name
+        run: |
+          gh release delete-asset ${{ github.ref_name }} "app-universal-release.apk" --yes 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
