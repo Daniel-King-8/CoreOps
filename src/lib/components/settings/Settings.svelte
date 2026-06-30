@@ -7,6 +7,7 @@
 	import BackupTab from './BackupTab.svelte';
 	import AITab from './AITab.svelte';
 	import PluginsTab from './PluginsTab.svelte';
+	import AboutTab from './AboutTab.svelte';
 	import { t } from '$lib/state/i18n.svelte';
 
 	interface Props {
@@ -16,7 +17,7 @@
 
 	let { open, onclose }: Props = $props();
 
-	type TabId = 'general' | 'appearance' | 'security' | 'sync' | 'backup' | 'ai' | 'plugins';
+	type TabId = 'general' | 'appearance' | 'security' | 'sync' | 'backup' | 'ai' | 'plugins' | 'about';
 
 	let tabs = $derived([
 		{ id: 'general' as TabId, label: t('settings.general'), icon: 'M12 15a3 3 0 100-6 3 3 0 000 6zM19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z' },
@@ -26,6 +27,7 @@
 		{ id: 'sync' as TabId, label: t('settings.sync'), icon: 'M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15' },
 		{ id: 'backup' as TabId, label: t('settings.backup'), icon: 'M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4' },
 		{ id: 'plugins' as TabId, label: t('settings.plugins'), icon: 'M13 2L3 14h9l-1 8 10-12h-9l1-8z' },
+		{ id: 'about' as TabId, label: t('settings.about'), icon: 'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
 	]);
 
 	let activeTabId = $state<TabId>('general');
@@ -70,6 +72,8 @@
 					<AITab />
 				{:else if activeTabId === 'plugins'}
 					<PluginsTab />
+				{:else if activeTabId === 'about'}
+					<AboutTab />
 				{/if}
 			</div>
 		</div>

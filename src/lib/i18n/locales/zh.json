@@ -630,6 +630,10 @@
   "settings.plugins_discover": "发现插件",
   "settings.plugins_version": "v{{version}}",
   "settings.plugins_by": "作者 {{author}}",
+  "settings.about": "关于",
+
+  "about.author": "作者",
+  "about.based_on": "基于",
 
   "session.jump_host": "跳板主机",
   "session.jump_host_enable": "通过跳板机连接",

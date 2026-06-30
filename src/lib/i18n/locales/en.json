@@ -630,6 +630,10 @@
   "settings.plugins_discover": "Discover Plugins",
   "settings.plugins_version": "v{{version}}",
   "settings.plugins_by": "by {{author}}",
+  "settings.about": "About",
+
+  "about.author": "Author",
+  "about.based_on": "Based on",
 
   "session.jump_host": "Jump Host",
   "session.jump_host_enable": "Connect via Jump Host",
