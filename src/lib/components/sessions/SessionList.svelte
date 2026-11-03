@@ -1,0 +1,2652 @@
+<script lang="ts">
+	import QuickConnect, { type QuickConnectPrefill } from './QuickConnect.svelte';
+	import RdpQuickConnect from '#lib/components/rdp/RdpQuickConnect.svelte';
+	import FaIcon from '#lib/components/shared/FaIcon.svelte';
+	import {
+		faPlus,
+		faBolt,
+		faDesktop,
+		faServer,
+		faFolderPlus,
+		faFileImport,
+		faMagnifyingGlass,
+		faXmark,
+		faListCheck,
+		faFolder,
+		faFolderOpen
+	} from '@fortawesome/free-solid-svg-icons';
+	import { registerSessionActions, shortcutLabel } from '#lib/state/shortcuts.svelte.js';
+	import { pendingSessionAction, takeSessionAction } from '#lib/state/palette.svelte.js';
+	import { parseAddress } from '#lib/utils/address.js';
+	import { noteSessionUsed, forgetSession } from '#lib/state/recents.svelte.js';
+	import { onMount, tick } from 'svelte';
+	import { listen } from '@tauri-apps/api/event';
+	import SessionEditor from './SessionEditor.svelte';
+	import SshConfigImport from './SshConfigImport.svelte';
+	import RdpImport from './RdpImport.svelte';
+	import SessionCard from './SessionCard.svelte';
+	import VaultSelector from '#lib/components/vault/VaultSelector.svelte';
+	import ContextMenuBackdrop from '#lib/components/shared/ContextMenuBackdrop.svelte';
+	import ConfirmAction from '#lib/components/devops/ConfirmAction.svelte';
+	import Modal from '#lib/components/shared/Modal.svelte';
+	import Button from '#lib/components/shared/Button.svelte';
+	import UntrustedRefsDialog from '#lib/components/pwmanager/UntrustedRefsDialog.svelte';
+	import { sessionUntrustedSecretRefs, sessionApproveSecretRefs, untrustedRefsFromError, type UntrustedRefs } from '#lib/ipc/sessions.js';
+	import { sessionKind, sessionGet, sessionList, sessionDelete, sessionUpdate, sessionListFolders, sessionCreateFolder, sessionUpdateFolderParent, sessionDeleteFolder, sessionMoveToFolder, type SessionConfig, type Folder } from '#lib/ipc/sessions.js';
+	import { setActivePage } from '#lib/state/navigation.svelte.js';
+	import { sshConnect, sshDisconnect, sshDetectOs, type JumpHostConnectParams } from '#lib/ipc/ssh.js';
+	// Passwords are now stored encrypted in vault, not in memory cache
+	import { createTab, updateTabOs } from '#lib/state/tabs.svelte.js';
+	import { getSettings, sessionLogConfig } from '#lib/state/settings.svelte.js';
+	import { addToast } from '#lib/state/toasts.svelte.js';
+	import { promptForMasterPassword } from '#lib/state/password-prompt.svelte.js';
+	import ConnectSteps from './ConnectSteps.svelte';
+	import { hasMasterPassword } from '#lib/ipc/credentials.js';
+	import { t } from '#lib/state/i18n.svelte.js';
+	import { providerName } from '#lib/state/pwmanager.svelte.js';
+	import type { SecretRef } from '#lib/ipc/pwmanager.js';
+	import { untrack } from 'svelte';
+	import { positionMenu } from '#lib/utils/positionMenu.js';
+	import { buildFolderTree, canMoveFolder, folderPath, type FolderTreeNode } from '#lib/sessions/folder-tree.js';
+	import { vaultState, checkState, initIdentity, importIdentity, ALL_VAULTS, loadVaultFilter, type VaultFilter } from '#lib/state/vault.svelte.js';
+
+	let showQuickConnect = $state(false);
+	let showRdpConnect = $state(false);
+	let showEditor = $state(false);
+	let showImport = $state(false);
+	let showRdpImport = $state(false);
+	let editingSession = $state<SessionConfig | undefined>();
+	let sessions = $state<SessionConfig[]>([]);
+	let loading = $state(true);
+	let deleteConfirm = $state<string | null>(null);
+
+	// What the list shows: everything, this device's default vault (null), or
+	// one vault by id. Restored from the last run; the selector confirms it on
+	// mount and updates it on change.
+	let selectedVaultId = $state<VaultFilter>(loadVaultFilter());
+
+	/** Where a new session or folder goes. "All vaults" is not a place, so it
+	 *  resolves to the device's default. */
+	let targetVaultId = $derived(selectedVaultId === ALL_VAULTS ? null : selectedVaultId);
+
+	// Search query
+	let searchQuery = $state('');
+
+	// ---- The field is also the quick connect --------------------------------
+	//
+	// Type a name and the list filters. Type something that reads as an
+	// address and a "Connect to …" suggestion appears; Enter takes it when no
+	// saved session matched. The detection is deliberately conservative: a
+	// session called "a.b" must filter, never connect (see utils/address).
+
+	let addressSuggestion = $derived(parseAddress(searchQuery));
+	let quickPrefill = $state<QuickConnectPrefill | null>(null);
+
+	function connectToAddress(): void {
+		if (!addressSuggestion) return;
+		quickPrefill = addressSuggestion;
+		showQuickConnect = true;
+	}
+
+	function onSearchKeydown(e: KeyboardEvent): void {
+		if (e.key !== 'Enter' || !addressSuggestion) return;
+		// A saved session matched what was typed; Enter must not skip past it
+		// to a stranger with the same name.
+		if (filteredSessions.length > 0) return;
+		e.preventDefault();
+		connectToAddress();
+	}
+
+	// ---- The "+" menu -------------------------------------------------------
+	let showAddMenu = $state(false);
+	let addMenuEl = $state<HTMLDivElement | undefined>();
+
+	$effect(() => {
+		if (!showAddMenu) return;
+		function outside(e: MouseEvent) {
+			if (addMenuEl && !addMenuEl.contains(e.target as Node)) showAddMenu = false;
+		}
+		function escape(e: KeyboardEvent) {
+			if (e.key === 'Escape') showAddMenu = false;
+		}
+		document.addEventListener('mousedown', outside, true);
+		document.addEventListener('keydown', escape, true);
+		return () => {
+			document.removeEventListener('mousedown', outside, true);
+			document.removeEventListener('keydown', escape, true);
+		};
+	});
+
+	function fromMenu(action: () => void): void {
+		showAddMenu = false;
+		action();
+	}
+
+	// Something outside the list changed what it holds: a vault joined twice
+	// was merged back into one.
+	$effect(() => {
+		const reload = () => void loadSessions();
+		window.addEventListener('reach:sessions-changed', reload);
+		return () => window.removeEventListener('reach:sessions-changed', reload);
+	});
+
+	// The command palette, or another workspace, asks for a session to be
+	// opened, with every prompt a normal connect has (password, passphrase):
+	// a shell inside a container opens this way, as the session with a
+	// different login shell. The sidebar shows this list for it, so it runs
+	// whichever panel was open.
+	$effect(() => {
+		const r = pendingSessionAction();
+		if (!r) return;
+		untrack(() => {
+			takeSessionAction();
+			if (r.kind === 'new-session') {
+				handleNewSession();
+			} else if (r.kind === 'quick-connect') {
+				quickPrefill = r.prefill ?? null;
+				showQuickConnect = true;
+			} else {
+				void sessionGet(r.sessionId)
+					.then((s) => {
+						setActivePage('terminal');
+						return handleConnect(r.shell ? { ...s, shell: r.shell } : s);
+					})
+					.catch((err) => addToast(String(err), 'error'));
+			}
+		});
+	});
+
+	onMount(() => {
+		registerSessionActions({
+			newSession: () => handleNewSession(),
+			quickConnect: () => {
+				quickPrefill = null;
+				showQuickConnect = true;
+			}
+		});
+		// Synced vaults list from an encrypted copy on this device that is
+		// refreshed from Turso in the background. When a refresh brings in a
+		// change, such as a session someone added to a shared vault, show it.
+		const unlistenSynced = listen<string>('vault-synced', () => {
+			void loadSessions();
+		});
+		return () => {
+			registerSessionActions(null);
+			void unlistenSynced.then((unlisten) => unlisten());
+		};
+	});
+
+	// Folders
+	let folders = $state<Folder[]>([]);
+	let collapsedFolders = $state<Set<string>>(new Set(JSON.parse(localStorage.getItem('collapsedFolders') ?? '[]')));
+	let creatingFolder = $state(false);
+	let creatingFolderParentId = $state<string | null>(null);
+	let newFolderName = $state('');
+
+	// Filter sessions by selected vault, then by search query
+	let filteredSessions = $derived.by(() => {
+		let result = sessions.filter(s => {
+			if (selectedVaultId === ALL_VAULTS) return true;
+			if (selectedVaultId === null) return !s.vault_id;
+			return s.vault_id === selectedVaultId;
+		});
+		const raw = searchQuery.trim();
+		const re = searchRegex.re;
+		if (re) {
+			result = result.filter(s => {
+				const fields = [s.name, s.host, s.username, `${s.username ? s.username + '@' : ''}${s.host}:${s.port}`, ...s.tags];
+				return fields.some(f => re.test(f));
+			});
+		} else if (searchRegex.error) {
+			result = [];
+		} else if (raw) {
+			const q = raw.toLowerCase();
+			result = result.filter(s =>
+				s.name.toLowerCase().includes(q) ||
+				s.host.toLowerCase().includes(q) ||
+				s.username.toLowerCase().includes(q) ||
+				s.tags.some(tag => tag.toLowerCase().includes(q))
+			);
+		}
+		return result;
+	});
+
+	/** "/pattern/flags" searches by regular expression (case-insensitive
+	 *  unless flags are given), over name, host, user, user@host:port and
+	 *  tags. A pattern that does not compile says why and matches nothing. */
+	let searchRegex = $derived.by((): { re: RegExp | null; error: string | null } => {
+		const m = /^\/(.+)\/([a-z]*)$/.exec(searchQuery.trim());
+		if (!m) return { re: null, error: null };
+		try {
+			// g and y would make test() remember where it stopped.
+			const flags = (m[2] || 'i').replace(/[gy]/g, '');
+			return { re: new RegExp(m[1], flags), error: null };
+		} catch (e) {
+			return { re: null, error: e instanceof Error ? e.message : String(e) };
+		}
+	});
+
+	// ---- Selecting several sessions -------------------------------------------
+	// Ctrl/Cmd+click toggles one, Shift+click selects the range from the last
+	// one clicked; "Select" turns plain clicks into selection (and is the way
+	// on a phone). Only sessions on screen stay selected, so a bulk action
+	// never reaches one the search has hidden.
+	let selectMode = $state(false);
+	let selected = $state(new Set<string>());
+	let lastSelected = $state<string | null>(null);
+	let selecting = $derived(selectMode || selected.size > 0);
+	let bulkDeleteConfirm = $state(false);
+	/** The move dialog: which sessions, the folder filter, the choice. */
+	let moveIds_ = $state<string[] | null>(null);
+	let moveFilter = $state('');
+	let moveTarget = $state<string | null | undefined>(undefined);
+	let moveNewName = $state('');
+	const NEW_FOLDER = '__new__';
+	let moveFolders = $derived(
+		moveFilter.trim() ? folders.filter(f => folderPath(f.id, folders).toLowerCase().includes(moveFilter.trim().toLowerCase())) : folders
+	);
+	/** Sessions to move into the folder being created. */
+	let pendingMove = $state<string[] | null>(null);
+
+	/** The sessions in the order they are shown, folded folders left out. */
+	function visibleOrder(): string[] {
+		const ordered: string[] = [];
+		function visit(node: FolderTreeNode): void {
+			if (!searchQuery.trim() && collapsedFolders.has(node.folder.id)) return;
+			ordered.push(...node.sessions.map(session => session.id));
+			node.children.forEach(visit);
+		}
+		folderTree.roots.forEach(visit);
+		ordered.push(...folderTree.ungrouped.map(session => session.id));
+		return ordered;
+	}
+
+	$effect(() => {
+		const shown = new Set(filteredSessions.map(s => s.id));
+		const current = untrack(() => selected);
+		const kept = [...current].filter(id => shown.has(id));
+		if (kept.length !== current.size) selected = new Set(kept);
+	});
+
+	function toggleSelect(session: SessionConfig, e: MouseEvent): void {
+		const next = new Set(selected);
+		const order = visibleOrder();
+		if (e.shiftKey && lastSelected && order.includes(lastSelected)) {
+			const a = order.indexOf(lastSelected);
+			const b = order.indexOf(session.id);
+			for (const id of order.slice(Math.min(a, b), Math.max(a, b) + 1)) next.add(id);
+		} else if (next.has(session.id)) {
+			next.delete(session.id);
+		} else {
+			next.add(session.id);
+		}
+		lastSelected = session.id;
+		selected = next;
+	}
+
+	function selectAllShown(): void {
+		selected = new Set(filteredSessions.map(s => s.id));
+		selectMode = true;
+	}
+
+	function clearSelection(): void {
+		selected = new Set();
+		selectMode = false;
+		bulkDeleteConfirm = false;
+		lastSelected = null;
+	}
+
+	/** What a menu or drag on `session` acts on: the selection when the
+	 *  session is in it, else the session alone. */
+	function targetsOf(session: SessionConfig): string[] {
+		return selected.has(session.id) ? [...selected] : [session.id];
+	}
+
+	function openMove(ids: string[]): void {
+		moveIds_ = ids;
+		moveFilter = '';
+		moveTarget = undefined;
+		moveNewName = '';
+	}
+
+	async function confirmMove(): Promise<void> {
+		const ids = moveIds_;
+		if (!ids || moveTarget === undefined) return;
+		let target = moveTarget;
+		if (target === NEW_FOLDER) {
+			const name = moveNewName.trim();
+			if (!name) return;
+			try {
+				target = (await sessionCreateFolder(name, null, targetVaultId)).id;
+				folders = await sessionListFolders();
+			} catch (err) {
+				addToast(String(err), 'error');
+				return;
+			}
+		}
+		moveIds_ = null;
+		await moveIds(ids, target);
+	}
+
+	async function moveIds(ids: string[], folderId: string | null): Promise<void> {
+		closeContextMenu();
+		try {
+			const n = await sessionMoveToFolder(ids, folderId);
+			await loadSessions();
+			if (ids.length > 1) {
+				const name = folderId ? (folders.find(f => f.id === folderId)?.name ?? '') : '';
+				addToast(folderId ? t('session.moved_n', { count: String(n), folder: name }) : t('session.moved_out_n', { count: String(n) }), 'success');
+				clearSelection();
+			}
+		} catch (err) {
+			addToast(String(err), 'error');
+		}
+	}
+
+	async function deleteSelected(): Promise<void> {
+		const ids = [...selected];
+		bulkDeleteConfirm = false;
+		let done = 0;
+		try {
+			for (const id of ids) {
+				await sessionDelete(id);
+				done++;
+			}
+		} catch (err) {
+			addToast(String(err), 'error');
+		}
+		await loadSessions();
+		addToast(t('session.deleted_n', { count: String(done) }), 'success');
+		clearSelection();
+	}
+
+	$effect(() => {
+		if (!selecting) return;
+		function onKey(e: KeyboardEvent) {
+			// A dialog on top closes itself first.
+			if (e.key === 'Escape' && !moveIds_ && !bulkDeleteConfirm) clearSelection();
+		}
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	});
+
+	function newFolderFor(ids: string[]): void {
+		closeContextMenu();
+		pendingMove = ids;
+		creatingFolderParentId = null;
+		creatingFolder = true;
+		newFolderName = '';
+	}
+
+
+	// Build the hierarchy from Folder.parent_id. Search keeps ancestors of
+	// matching sessions visible; outside search, empty folders stay visible in
+	// the selected vault so they can receive sessions or subfolders.
+	let folderTree = $derived.by(() => buildFolderTree(folders, filteredSessions, (folder) =>
+		!searchQuery.trim() && selectedVaultId !== ALL_VAULTS &&
+		(folder.vault_id === undefined || folder.vault_id === null || folder.vault_id === selectedVaultId)
+	));
+
+	function toggleFolder(folderId: string): void {
+		const next = new Set(collapsedFolders);
+		if (next.has(folderId)) next.delete(folderId);
+		else next.add(folderId);
+		collapsedFolders = next;
+		localStorage.setItem('collapsedFolders', JSON.stringify([...next]));
+	}
+
+	async function handleCreateFolder(): Promise<void> {
+		const name = newFolderName.trim();
+		if (!name) return;
+		try {
+			const parent = creatingFolderParentId ? folders.find(folder => folder.id === creatingFolderParentId) : undefined;
+			const folder = await sessionCreateFolder(name, creatingFolderParentId, parent ? parent.vault_id : targetVaultId);
+			if (creatingFolderParentId) {
+				const next = new Set(collapsedFolders);
+				next.delete(creatingFolderParentId);
+				collapsedFolders = next;
+				localStorage.setItem('collapsedFolders', JSON.stringify([...next]));
+			}
+			newFolderName = '';
+			creatingFolder = false;
+			creatingFolderParentId = null;
+			folders = await sessionListFolders();
+			const ids = pendingMove;
+			pendingMove = null;
+			if (ids?.length) await moveIds(ids, folder.id);
+		} catch (err) {
+			addToast(String(err), 'error');
+		}
+	}
+
+	async function handleDeleteFolder(folderId: string): Promise<void> {
+		const folder = folders.find(item => item.id === folderId);
+		const parentId = folder?.parent_id ?? null;
+		const movedChildren: Folder[] = [];
+		const movedSessions = sessions.filter(item => item.folder_id === folderId);
+		try {
+			for (const child of folders.filter(item => item.parent_id === folderId)) {
+				await sessionUpdateFolderParent(child.id, parentId);
+				movedChildren.push(child);
+			}
+			if (movedSessions.length) await sessionMoveToFolder(movedSessions.map(session => session.id), parentId);
+			await sessionDeleteFolder(folderId);
+		} catch (err) {
+			if (movedSessions.length) {
+				try { await sessionMoveToFolder(movedSessions.map(session => session.id), folderId); } catch { /* reload below shows any unrecoverable write */ }
+			}
+			for (const child of movedChildren.reverse()) {
+				try { await sessionUpdateFolderParent(child.id, folderId); } catch { /* same */ }
+			}
+			addToast(String(err), 'error');
+		} finally {
+			folders = await sessionListFolders();
+			await loadSessions();
+		}
+	}
+
+	// Drag & drop via pointer events (HTML5 DnD doesn't work in Tauri WebView2 on Windows)
+	let dragSession = $state<SessionConfig | undefined>();
+	let dropTarget = $state<string | null | undefined>();
+	let dragging = $state(false);
+
+	function handleDragStart(e: PointerEvent, session: SessionConfig): void {
+		dragSession = session;
+		dragging = true;
+		const onMove = (me: PointerEvent) => {
+			if (!dragSession) return;
+			// Find drop target by checking which folder header we're over
+			dropTarget = undefined;
+			const el = document.elementFromPoint(me.clientX, me.clientY);
+			if (el) {
+				const folderEl = el.closest('[data-folder-id]') as HTMLElement | null;
+				if (folderEl) {
+					dropTarget = folderEl.dataset.folderId === '__ungrouped__' ? null : folderEl.dataset.folderId!;
+				} else {
+					dropTarget = undefined;
+				}
+			}
+		};
+		const onUp = async () => {
+			window.removeEventListener('pointermove', onMove);
+			window.removeEventListener('pointerup', onUp);
+			const session = dragSession;
+			const target = dropTarget;
+			dragSession = undefined;
+			dropTarget = undefined;
+			dragging = false;
+			if (session && target !== undefined && (selected.has(session.id) || session.folder_id !== target)) {
+				await moveIds(targetsOf(session), target);
+			}
+		};
+		window.addEventListener('pointermove', onMove);
+		window.addEventListener('pointerup', onUp);
+	}
+
+	// Right-click context menu
+	let contextMenu = $state<{ x: number; y: number; session?: SessionConfig; folder?: Folder } | undefined>();
+
+	function openSessionContextMenu(e: MouseEvent, session: SessionConfig): void {
+		e.preventDefault();
+		e.stopPropagation();
+		contextMenu = { x: e.clientX, y: e.clientY, session };
+	}
+
+	function openBackgroundContextMenu(e: MouseEvent): void {
+		e.preventDefault();
+		contextMenu = { x: e.clientX, y: e.clientY };
+	}
+
+	function openFolderContextMenu(e: MouseEvent, folder: Folder): void {
+		e.preventDefault();
+		e.stopPropagation();
+		contextMenu = { x: e.clientX, y: e.clientY, folder };
+	}
+
+	function openFolderMenu(e: MouseEvent, folder: Folder): void {
+		e.stopPropagation();
+		const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		contextMenu = { x: rect.right, y: rect.bottom, folder };
+	}
+
+	function closeContextMenu(): void {
+		contextMenu = undefined;
+	}
+
+	async function moveToFolder(session: SessionConfig, folderId: string | null): Promise<void> {
+		await moveIds(targetsOf(session), folderId);
+	}
+
+	function contextNewFolder(parentId: string | null = null): void {
+		const session = contextMenu?.session;
+		closeContextMenu();
+		creatingFolderParentId = parentId;
+		newFolderName = '';
+		if (session) newFolderFor(targetsOf(session));
+		else creatingFolder = true;
+	}
+
+	async function moveFolder(folder: Folder, parentId: string | null): Promise<void> {
+		closeContextMenu();
+		if (!canMoveFolder(folder.id, parentId, folders)) return;
+		try {
+			await sessionUpdateFolderParent(folder.id, parentId);
+			folders = await sessionListFolders();
+		} catch (err) {
+			addToast(String(err), 'error');
+		}
+	}
+
+	// Vault state (TLS-style: auto-unlock, no password needed)
+	let locked = $derived(vaultState.locked);
+
+	// Unlocking from the lock screen (password, fingerprint, security key) has
+	// to bring the list back: a load that ran while the vault was locked found
+	// nothing, and the list would otherwise stay empty until something else
+	// asked it to reload.
+	let wasOpen = !vaultState.locked && !vaultState.held;
+	$effect(() => {
+		const open = !vaultState.locked && !vaultState.held;
+		if (open && !wasOpen) void loadSessions();
+		wasOpen = open;
+	});
+	let hasIdentity = $derived(vaultState.hasIdentity);
+	let keychainError = $derived(vaultState.keychainError);
+	let initializing = $state(false);
+	let initError = $state('');
+	let importKey = $state('');
+	let importing = $state(false);
+
+	// Connect prompt state
+	let connectSession = $state<SessionConfig | undefined>();
+	let connectPassword = $state('');
+	let connectKeyPassphrase = $state('');
+	let connecting = $state(false);
+	let connectingId = $state<string | undefined>();
+	let connectError = $state<string | undefined>();
+	let rememberPassword = $state(false);
+	let hasSavedPassword = $state(false);
+	// When the saved auth method (key/agent) gets rejected by the server, switch
+	// the modal to "fallback to password" mode without losing context.
+	let passwordFallback = $state(false);
+	let fallbackPassword = $state('');
+
+	let showConnectPrompt = $derived(!!connectSession);
+
+	// Programmatic focus for the fallback input — `autofocus` is unreliable
+	// inside conditionally-rendered blocks across WebView versions.
+	let fallbackInputEl: HTMLInputElement | undefined = $state();
+	$effect(() => {
+		if (passwordFallback && fallbackInputEl) {
+			fallbackInputEl.focus();
+		}
+	});
+
+	async function loadSessions(): Promise<void> {
+		try {
+			[sessions, folders] = await Promise.all([sessionList(), sessionListFolders()]);
+		} catch (err) {
+			console.error('Failed to load sessions:', err);
+		} finally {
+			loading = false;
+		}
+		void warnIfNoMasterPassword();
+	}
+
+	// Identities created before the issue-25 fix never persisted a
+	// password-encrypted copy of the secret key, so the OS keychain is the only
+	// thing that can open them. If that entry is ever lost the vault is
+	// unrecoverable — the failure reported in issue #30. Ask for one while the
+	// vault is still open and it can be set, in a window that sets it rather
+	// than a notice that points to Settings. Once per launch.
+	let warnedNoPassword = false;
+	async function warnIfNoMasterPassword(): Promise<void> {
+		if (warnedNoPassword) return;
+		try {
+			if (!(await hasMasterPassword())) {
+				warnedNoPassword = true;
+				promptForMasterPassword();
+			}
+		} catch {
+			// A diagnostic must never break loading the session list.
+		}
+	}
+
+	/**
+	 * Open a saved RDP session in a desktop tab. The panel connects once it
+	 * knows its size; nothing to await here. Saving the password is the same
+	 * promise the SSH prompt makes, kept the same way.
+	 */
+	async function openRdp(session: SessionConfig, password: string, remember: boolean, passwordRef?: SecretRef | null): Promise<void> {
+		const tab = createTab('rdp', `${session.username}@${session.host}`, undefined, session.name, session.detected_os ?? 'windows');
+		tab.rdpConnectParams = {
+			id: tab.id,
+			host: session.host,
+			port: session.port,
+			username: session.username,
+			// The backend fetches the password from the manager; none goes beside it.
+			password: passwordRef ? '' : password,
+			passwordRef: passwordRef ?? null,
+			sessionId: session.id,
+			domain: session.domain ?? undefined,
+			sharePath: session.share_path ?? undefined,
+			width: 0,
+			height: 0,
+		};
+		addToast(t('session.connected_toast', { name: session.name }), 'success');
+
+		const stored = session.auth_method.type === 'Password' ? session.auth_method.password : undefined;
+		if (remember && !passwordRef && password && password !== stored) {
+			try {
+				await sessionUpdate({ ...session, auth_method: { type: 'Password', password } });
+				await loadSessions();
+			} catch {
+				// The desktop is open either way; the prompt returns next time.
+			}
+		}
+	}
+
+	/**
+	 * Open a saved VNC session in a desktop tab. A VNC server may ask for no
+	 * password at all, so a session without one connects as it is; one that
+	 * does ask says so on the panel.
+	 */
+	function openVnc(session: SessionConfig): void {
+		const tab = createTab('vnc', session.host, undefined, session.name, session.detected_os ?? null);
+		tab.vncConnectParams = {
+			id: tab.id,
+			host: session.host,
+			port: session.port,
+			password: session.auth_method.type === 'Password' && !session.auth_method.password_ref ? (session.auth_method.password ?? '') : '',
+			passwordRef: session.auth_method.type === 'Password' ? (session.auth_method.password_ref ?? null) : null,
+			sessionId: session.id,
+			viaSessionId: session.via_session_id ?? null,
+		};
+		addToast(t('session.connected_toast', { name: session.name }), 'success');
+	}
+
+	/** Launch a local WSL session as a terminal tab */
+	function openWsl(session: SessionConfig): void {
+		const distro = session.wsl_distro?.trim();
+		const args = distro ? ['-d', distro] : [];
+		if (session.username?.trim()) {
+			args.push('-u', session.username.trim());
+		}
+		setActivePage('terminal');
+		const connectionId = `wsl-${crypto.randomUUID()}`;
+		createTab(
+			'local',
+			distro ? `${distro} · WSL` : 'WSL',
+			connectionId,
+			session.name,
+			undefined,
+			{ program: 'wsl.exe', args },
+			distro ?? ''
+		);
+		addToast(t('session.connected_toast', { name: session.name }), 'success');
+	}
+
+	// Password manager entries the user has not approved for a session (see
+	// UntrustedRefsDialog). One question at a time; the connect waits on it.
+	let askedRefs = $state<UntrustedRefs | null>(null);
+	let approvingRefs = $state(false);
+	let approveRefsError = $state<string | undefined>();
+	let answerAsked: ((allowed: boolean) => void) | null = null;
+
+	function askToApprove(asked: UntrustedRefs): Promise<boolean> {
+		answerAsked?.(false);
+		return new Promise((resolve) => {
+			approveRefsError = undefined;
+			askedRefs = asked;
+			answerAsked = resolve;
+		});
+	}
+
+	function finishAsking(allowed: boolean): void {
+		const answer = answerAsked;
+		answerAsked = null;
+		askedRefs = null;
+		approveRefsError = undefined;
+		answer?.(allowed);
+	}
+
+	async function allowAskedRefs(): Promise<void> {
+		if (!askedRefs || approvingRefs) return;
+		approvingRefs = true;
+		try {
+			await sessionApproveSecretRefs(askedRefs);
+			finishAsking(true);
+			void loadSessions();
+		} catch (err) {
+			// The session changed while the dialog was open, or could not be
+			// saved: say so, approve nothing.
+			approveRefsError = String(err);
+		} finally {
+			approvingRefs = false;
+		}
+	}
+
+	function hasRefs(s: SessionConfig): boolean {
+		const ref = (a: SessionConfig['auth_method']) => !!(a.type === 'Password' ? a.password_ref : a.type === 'Key' ? a.passphrase_ref : null);
+		return ref(s.auth_method) || (s.jump_chain ?? []).some((j) => ref(j.auth_method)) || !!s.proxy?.password_ref;
+	}
+
+	/**
+	 * Before connecting: the session's password manager entries, and those
+	 * of the SSH session a VNC one goes through, must be approved by this
+	 * user. Asks about any that are not; false when the user said no.
+	 */
+	async function approveRefsFirst(session: SessionConfig): Promise<boolean> {
+		const ids: string[] = [];
+		if (hasRefs(session)) ids.push(session.id);
+		const via = sessionKind(session) === 'vnc' ? session.via_session_id : null;
+		if (via) {
+			const viaSession = sessions.find((s) => s.id === via);
+			if (!viaSession || hasRefs(viaSession)) ids.push(via);
+		}
+		for (const id of ids) {
+			let asked: UntrustedRefs | null;
+			try {
+				asked = await sessionUntrustedSecretRefs(id);
+			} catch {
+				// The connect itself will say what is wrong.
+				continue;
+			}
+			if (asked && !(await askToApprove(asked))) return false;
+		}
+		return true;
+	}
+
+	async function handleConnect(session: SessionConfig): Promise<void> {
+		if (!(await approveRefsFirst(session))) return;
+		noteSessionUsed(session.id);
+		if (sessionKind(session) === 'vnc') {
+			openVnc(session);
+			return;
+		}
+		if (sessionKind(session) === 'wsl') {
+			openWsl(session);
+			return;
+		}
+		// Check if credentials are stored in the session (from vault)
+		const storedPassword = session.auth_method.type === 'Password' ? session.auth_method.password : undefined;
+		// A password manager entry stands in for a saved secret: the backend
+		// fetches it at connect, so there is nothing to ask for.
+		const passwordRef = session.auth_method.type === 'Password' ? (session.auth_method.password_ref ?? null) : null;
+
+		if (sessionKind(session) === 'rdp' && (storedPassword || passwordRef)) {
+			await openRdp(session, storedPassword ?? '', false, passwordRef);
+			return;
+		}
+		const storedPassphrase = session.auth_method.type === 'Key' ? session.auth_method.passphrase : undefined;
+		const passphraseRef = session.auth_method.type === 'Key' ? (session.auth_method.passphrase_ref ?? null) : null;
+
+		// A key session has everything it needs the moment it names a key:
+		// most keys have no passphrase at all, and an imported one carries its
+		// own. Asking first made every passphrase-less key look broken — the
+		// user typed a password into a passphrase box, and the key then failed
+		// to load (issue #46). If the key really is locked, the backend says
+		// so and the prompt appears then, which is the only time it helps.
+		const keyReady =
+			session.auth_method.type === 'Key' &&
+			(!!session.auth_method.key_id || !!session.auth_method.path?.trim());
+
+		// Auto-connect if we have stored credentials OR Agent auth
+		if (storedPassword || storedPassphrase || passwordRef || passphraseRef || keyReady || session.auth_method.type === 'Agent') {
+			connectSession = session;
+			connectError = undefined;
+			rememberPassword = true;
+			hasSavedPassword = !!storedPassword || !!storedPassphrase || !!passwordRef || !!passphraseRef;
+
+			// With an entry from a password manager the stored plaintext is not
+			// sent: the entry wins (an empty field here means "use the entry").
+			if (session.auth_method.type === 'Password') {
+				connectPassword = passwordRef ? '' : (storedPassword ?? '');
+			} else if (session.auth_method.type === 'Key') {
+				connectKeyPassphrase = passphraseRef ? '' : (storedPassphrase ?? '');
+			}
+
+			await doConnect();
+			return;
+		}
+
+		// Otherwise show the prompt for credentials
+		connectSession = session;
+		connectPassword = '';
+		connectKeyPassphrase = '';
+		connectError = undefined;
+		rememberPassword = false;
+		hasSavedPassword = false;
+		passwordFallback = false;
+		fallbackPassword = '';
+	}
+
+	async function doConnect(): Promise<void> {
+		if (!connectSession) return;
+		// A new attempt: the last one's steps, and the step it broke at, go.
+		connectingId = undefined;
+		// Don't submit an empty password while in fallback mode — that just
+		// burns another round-trip with the same failure.
+		if (passwordFallback && !fallbackPassword) {
+			connectError = t('session.password_required');
+			return;
+		}
+		connecting = true;
+		connectError = undefined;
+
+		const session = connectSession;
+
+		if (sessionKind(session) === 'rdp') {
+			const rdpRef = session.auth_method.type === 'Password' && !connectPassword ? (session.auth_method.password_ref ?? null) : null;
+			if (!connectPassword && !rdpRef) {
+				connectError = t('session.password_required');
+				connecting = false;
+				return;
+			}
+			await openRdp(session, connectPassword, rememberPassword, rdpRef);
+			connectSession = undefined;
+			connecting = false;
+			return;
+		}
+
+		const id = crypto.randomUUID();
+		connectingId = id;
+
+		// If the user is in password-fallback mode, force password auth regardless of saved method.
+		const authType = passwordFallback ? 'Password' : session.auth_method.type;
+
+		const passwordToSave = authType === 'Password' ? (passwordFallback ? fallbackPassword : connectPassword) : connectKeyPassphrase;
+
+		// Build jump chain from session config if present
+		const jumpChain: JumpHostConnectParams[] | undefined = session.jump_chain && session.jump_chain.length > 0
+			? session.jump_chain.map(j => ({
+				host: j.host,
+				port: j.port,
+				username: j.username,
+				authMethod: j.auth_method.type === 'Key' ? 'key' : j.auth_method.type.toLowerCase(),
+				// A password manager entry wins; the plaintext goes only without one.
+				password: j.auth_method.type === 'Password' && !j.auth_method.password_ref ? j.auth_method.password : undefined,
+				passwordRef: j.auth_method.type === 'Password' ? (j.auth_method.password_ref ?? undefined) : undefined,
+				keyPath: j.auth_method.type === 'Key' ? j.auth_method.path : undefined,
+				keyId: j.auth_method.type === 'Key' ? j.auth_method.key_id : undefined,
+				keyPassphrase: j.auth_method.type === 'Key' && !j.auth_method.passphrase_ref ? j.auth_method.passphrase : undefined,
+				keyPassphraseRef: j.auth_method.type === 'Key' ? (j.auth_method.passphrase_ref ?? undefined) : undefined,
+			}))
+			: undefined;
+
+		let untrusted: UntrustedRefs | null = null;
+		try {
+			const sessionKeyPath = session.auth_method.type === 'Key' ? session.auth_method.path : undefined;
+			const sessionKeyId = session.auth_method.type === 'Key' ? session.auth_method.key_id : undefined;
+			const passwordToUse = authType === 'Password'
+				? (passwordFallback ? fallbackPassword : connectPassword)
+				: undefined;
+			// The session's password manager entries, unless something was typed
+			// in the prompt for this attempt: then that is what the user means.
+			const passwordRef = authType === 'Password' && !passwordFallback && !passwordToUse && session.auth_method.type === 'Password'
+				? (session.auth_method.password_ref ?? undefined)
+				: undefined;
+			const keyPassphraseRef = authType === 'Key' && !connectKeyPassphrase && session.auth_method.type === 'Key'
+				? (session.auth_method.passphrase_ref ?? undefined)
+				: undefined;
+			const connectParams = {
+				id,
+				host: session.host,
+				port: session.port,
+				username: session.username,
+				authMethod: authType === 'Key' ? 'key' : authType.toLowerCase(),
+				password: passwordToUse,
+				passwordRef,
+				keyPath: authType === 'Key' && sessionKeyPath ? sessionKeyPath.trim() : undefined,
+				keyId: authType === 'Key' && sessionKeyId ? sessionKeyId : undefined,
+				keyPassphrase: authType === 'Key' && connectKeyPassphrase ? connectKeyPassphrase : undefined,
+				keyPassphraseRef,
+				cols: 80,
+				rows: 24,
+				shell: session.shell ?? undefined,
+				injectColors: getSettings().typeShellSetup,
+				sessionLog: sessionLogConfig(),
+				showLoginMessage: getSettings().showLoginMessage,
+				tryAgentKeys: authType === 'Key' && session.try_agent_keys === true,
+				sshOptions: session.ssh_options ?? null,
+				// Password manager entries are taken from the stored session.
+				sessionId: session.id,
+				jumpChain,
+				proxy: session.proxy ? {
+					proxy_type: session.proxy.proxy_type,
+					host: session.proxy.host,
+					port: session.proxy.port,
+					username: session.proxy.username ?? undefined,
+					password: session.proxy.password_ref ? undefined : (session.proxy.password ?? undefined),
+					password_ref: session.proxy.password_ref ?? undefined,
+				} : undefined,
+			};
+			await sshConnect(connectParams);
+
+			const tab = createTab('ssh', `${session.username}@${session.host}`, id, session.name, session.detected_os);
+			tab.sshConnectParams = connectParams;
+			addToast(t('session.connected_toast', { name: session.name }), 'success');
+			connectSession = undefined;
+			passwordFallback = false;
+			fallbackPassword = '';
+
+			// Detect OS in background and persist to session
+			if (!session.detected_os) {
+				sshDetectOs(id).then(async (osId) => {
+					if (osId) {
+						updateTabOs(id, osId);
+						try {
+							// Only the OS changes, on the session as stored. The copy
+							// connected with may carry a one-off override (a shell
+							// inside a container), which must never be saved.
+							const stored = await sessionGet(session.id);
+							await sessionUpdate({ ...stored, detected_os: osId });
+							await loadSessions();
+						} catch {
+							// Non-critical: icon will show next time
+						}
+					}
+				}).catch(() => {});
+			}
+		} catch (err) {
+			// The session's password manager entries are not approved (it
+			// changed since the list was read): ask, below, then try again.
+			untrusted = untrustedRefsFromError(err);
+			const errStr = String(err);
+			if (!untrusted) connectError = errStr;
+			// If the saved auth method got rejected and we haven't already tried the password fallback,
+			// switch the modal to password mode so the user can retry without changing the session.
+			const isAuthRejection = /auth/i.test(errStr) && (
+				/reject/i.test(errStr) || /fail/i.test(errStr) || /denied/i.test(errStr)
+			);
+			// A locked key is not a rejected credential: the server never saw
+			// one. The prompt is already open on the passphrase field, which is
+			// what this needs — offering a password instead would be answering
+			// a question nobody asked.
+			const needsPassphrase = /passphrase/i.test(errStr);
+			if (!untrusted && isAuthRejection && !needsPassphrase && !passwordFallback && session.auth_method.type !== 'Password') {
+				passwordFallback = true;
+				fallbackPassword = '';
+			}
+		} finally {
+			connecting = false;
+		}
+		if (untrusted) {
+			if (await askToApprove(untrusted)) await doConnect();
+			else cancelConnect();
+		}
+	}
+
+	/** The password manager entry the prompt's secret field stands in for, if any. */
+	function promptRef(session: SessionConfig): SecretRef | null {
+		const a = session.auth_method;
+		if (a.type === 'Password') return a.password_ref ?? null;
+		if (a.type === 'Key') return a.passphrase_ref ?? null;
+		return null;
+	}
+
+	function cancelConnect(): void {
+		if (connecting && connectingId) {
+			// Try to clean up the in-flight connection on the backend
+			sshDisconnect(connectingId).catch(() => {});
+		}
+		connecting = false;
+		connectingId = undefined;
+		connectSession = undefined;
+		passwordFallback = false;
+		fallbackPassword = '';
+	}
+
+	function handleEdit(session: SessionConfig): void {
+		editingSession = session;
+		showEditor = true;
+	}
+
+	async function handleDelete(session: SessionConfig): Promise<void> {
+		if (deleteConfirm !== session.id) {
+			deleteConfirm = session.id;
+			// Auto-clear confirmation after 3 seconds
+			setTimeout(() => {
+				deleteConfirm = null;
+			}, 3000);
+			return;
+		}
+
+		try {
+			await sessionDelete(session.id);
+			forgetSession(session.id);
+			deleteConfirm = null;
+			await loadSessions();
+		} catch (err) {
+			console.error('Delete failed:', err);
+			addToast(String(err), 'error');
+		}
+	}
+
+	function handleNewSession(): void {
+		editingSession = undefined;
+		showEditor = true;
+	}
+
+	function handleEditorSave(): void {
+		loadSessions();
+	}
+
+	// TLS-style: initialize identity (generates X25519 keypair, stores in OS keychain)
+	async function handleInitialize(): Promise<void> {
+		initializing = true;
+		initError = '';
+		try {
+			await initIdentity(''); // No password needed - TLS-style
+			await loadSessions();
+			addToast(t('session.identity_created_toast'), 'success');
+		} catch (err) {
+			initError = String(err);
+		} finally {
+			initializing = false;
+		}
+	}
+
+	// Import identity from backup key
+	async function handleImport(): Promise<void> {
+		if (!importKey.trim()) {
+			initError = t('session.enter_backup_key');
+			return;
+		}
+		importing = true;
+		initError = '';
+		try {
+			await importIdentity(importKey.trim());
+			await loadSessions();
+			importKey = '';
+			addToast(t('session.identity_restored_toast'), 'success');
+		} catch (err) {
+			initError = String(err);
+		} finally {
+			importing = false;
+		}
+	}
+
+	// Reset - delete existing data and start fresh
+	async function handleReset(): Promise<void> {
+		// Delete identity file and vaults to start fresh
+		try {
+			const { invoke } = await import('@tauri-apps/api/core');
+			await invoke('vault_reset');
+			await checkState();
+			addToast(t('session.data_cleared_toast'), 'info');
+		} catch (err) {
+			initError = String(err);
+		}
+	}
+
+	// Load sessions and vaults on mount (auto-unlock via OS keychain).
+	//
+	// Every path out of here must clear `loading`. Without the catch, a single
+	// rejected vault IPC left the spinner up forever and the session list never
+	// appeared — the panel looked like it was loading endlessly. That is easy to
+	// hit in normal use: open a session, use the file manager (which reads
+	// credentials out of the vault), then switch back to Sessions, which
+	// remounts this component and re-runs the whole check against a vault that
+	// is busy.
+	//
+	// checkState() already refreshes the vault list once it unlocks, so the
+	// second refreshVaults() that used to be here was a redundant round-trip and
+	// one more thing that could reject.
+	$effect(() => {
+		untrack(() => {
+			checkState()
+				.then(async () => {
+					if (!vaultState.locked) {
+						await loadSessions();
+					} else {
+						loading = false;
+					}
+				})
+				.catch((err) => {
+					console.error('Failed to load the session list:', err);
+					addToast(String(err), 'error');
+					loading = false;
+				});
+		});
+	});
+</script>
+
+{#snippet newFolderRow()}
+	<div class="new-folder-row">
+		<svg width="14" height="14" viewBox="0 0 24 24" fill="none" class="new-folder-icon"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+		{#if creatingFolderParentId}<span class="new-folder-parent">{folderPath(creatingFolderParentId, folders)} /</span>{/if}
+		<form class="new-folder-form" onsubmit={(e) => { e.preventDefault(); handleCreateFolder(); }}>
+			<input class="new-folder-input" type="text" placeholder={t('session.folder_name')} bind:value={newFolderName} />
+			<button class="new-folder-save" type="submit" disabled={!newFolderName.trim()}>{t('common.save')}</button>
+			<button class="new-folder-cancel" type="button" onclick={() => { creatingFolder = false; creatingFolderParentId = null; pendingMove = null; newFolderName = ''; }}>{t('common.cancel')}</button>
+		</form>
+	</div>
+{/snippet}
+
+{#snippet sessionRow(session: SessionConfig, depth: number)}
+	{#if deleteConfirm === session.id}
+		<div class="delete-confirm" style:margin-left={depth >= 0 ? `${Math.min(depth + 1, 8) * 14}px` : undefined}>
+			<span class="delete-confirm-text">{t('session.delete_confirm', { name: session.name })}</span>
+			<button class="delete-confirm-btn" onclick={() => handleDelete(session)}>{t('common.confirm')}</button>
+			<button class="delete-cancel-btn" onclick={() => (deleteConfirm = null)}>{t('common.cancel')}</button>
+		</div>
+	{:else}
+		<div class:folder-session={depth >= 0} style:padding-left={depth >= 0 ? `${Math.min(depth + 1, 8) * 14}px` : undefined}>
+			<SessionCard {session} vault={selectedVaultId === ALL_VAULTS && session.vault_id ? (vaultState.vaults.get(session.vault_id) ?? null) : null} onconnect={() => handleConnect(session)} onedit={() => handleEdit(session)} ondelete={() => handleDelete(session)} oncontextmenu={(e) => openSessionContextMenu(e, session)} ondragstart={(e) => handleDragStart(e, session)} ondragend={() => {}} {selecting} selected={selected.has(session.id)} onselect={(e) => toggleSelect(session, e)} />
+		</div>
+	{/if}
+{/snippet}
+
+{#snippet folderNode(node: FolderTreeNode)}
+	<div class="folder-node" data-folder-id={node.folder.id}>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="folder-header" class:drop-active={dropTarget === node.folder.id && dragging} data-folder-id={node.folder.id} style:padding-left={`${6 + Math.min(node.depth, 8) * 14}px`} oncontextmenu={(e) => openFolderContextMenu(e, node.folder)}>
+			<button class="folder-toggle" onclick={() => toggleFolder(node.folder.id)} aria-expanded={!collapsedFolders.has(node.folder.id)} title={folderPath(node.folder.id, folders)}>
+				<svg width="10" height="10" viewBox="0 0 10 10" fill="none" class="folder-chevron" class:collapsed={collapsedFolders.has(node.folder.id)}><path d="M3 2l4 3-4 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" class="folder-icon"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+				<span class="folder-name">{node.folder.name}</span><span class="folder-count">{node.totalSessions}</span>
+			</button>
+			<button class="folder-menu-btn" onclick={(e) => openFolderMenu(e, node.folder)} aria-label={t('session.move_to_folder')} title={t('session.move_to_folder')}><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="2" cy="6" r="1.2"/><circle cx="6" cy="6" r="1.2"/><circle cx="10" cy="6" r="1.2"/></svg></button>
+			<button class="folder-delete-btn" onclick={() => handleDeleteFolder(node.folder.id)} title={t('common.delete')}><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M1 1l8 8M9 1L1 9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></button>
+		</div>
+		{#if searchQuery.trim() || !collapsedFolders.has(node.folder.id)}
+			{#each node.sessions as session (session.id)}{@render sessionRow(session, node.depth)}{/each}
+			{#each node.children as child (child.folder.id)}{@render folderNode(child)}{/each}
+		{/if}
+	</div>
+{/snippet}
+
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="session-list" oncontextmenu={(e) => e.preventDefault()}>
+	{#if !hasIdentity}
+		<!-- First run: Initialize identity (TLS-style, no password) -->
+		<div class="init-section">
+			<div class="init-icon">
+				<svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+					<path d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+				</svg>
+			</div>
+			<p class="init-title">{t('session.secure_sessions')}</p>
+			<p class="init-desc">{t('session.secure_sessions_desc')}</p>
+			{#if initError}
+				<p class="init-error">{initError}</p>
+			{/if}
+			<button class="init-btn" onclick={handleInitialize} disabled={initializing}>
+				{#if initializing}{t('session.initializing')}{:else}{t('session.initialize')}{/if}
+			</button>
+		</div>
+	{:else if keychainError}
+		<!-- Keychain error: data exists but can't access key -->
+		<div class="init-section">
+			<div class="init-icon error">
+				<svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+					<path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+				</svg>
+			</div>
+			<p class="init-title">{t('session.keychain_error')}</p>
+			<p class="init-desc">{t('session.keychain_error_desc')}</p>
+			{#if initError}
+				<p class="init-error">{initError}</p>
+			{/if}
+			<input
+				class="import-input"
+				type="password"
+				placeholder={t('session.paste_backup_key')}
+				bind:value={importKey}
+				disabled={importing}
+			/>
+			<div class="recovery-buttons">
+				<button class="init-btn" onclick={handleImport} disabled={importing || !importKey.trim()}>
+					{#if importing}{t('session.restoring')}{:else}{t('session.restore_identity')}{/if}
+				</button>
+				<button class="reset-btn" onclick={handleReset} disabled={importing}>
+					{t('session.start_fresh')}
+				</button>
+			</div>
+		</div>
+	{:else if locked}
+		<!-- Locked but has identity - keychain access failed -->
+		<div class="init-section">
+			<p class="init-desc">{t('session.keychain_locked_desc')}</p>
+		</div>
+	{:else}
+		<VaultSelector onvaultselect={(filter) => { selectedVaultId = filter; creatingFolder = false; creatingFolderParentId = null; pendingMove = null; newFolderName = ''; }} onrefresh={() => loadSessions()} />
+
+		<div class="tool-row">
+			<div class="search-row">
+				<span class="search-icon"><FaIcon icon={faMagnifyingGlass} size={11} /></span>
+				<input
+					class="search-input"
+					type="text"
+					placeholder={t('session.search_or_connect')}
+					bind:value={searchQuery}
+					onkeydown={onSearchKeydown}
+				/>
+				{#if searchQuery}
+					<button class="search-clear" onclick={() => (searchQuery = '')} aria-label={t('common.clear')}>
+						<FaIcon icon={faXmark} size={10} />
+					</button>
+				{/if}
+			</div>
+
+			<div class="add-wrap" bind:this={addMenuEl}>
+				<button
+					class="add-btn"
+					class:open={showAddMenu}
+					aria-haspopup="menu"
+					aria-expanded={showAddMenu}
+					title={t('session.add')}
+					aria-label={t('session.add')}
+					onclick={() => (showAddMenu = !showAddMenu)}
+				>
+					<FaIcon icon={faPlus} size={13} />
+				</button>
+				{#if showAddMenu}
+					<div class="add-menu pop-in" role="menu">
+						<button class="menu-item" role="menuitem" onclick={() => fromMenu(handleNewSession)}>
+							<FaIcon icon={faServer} size={12} />
+							<span>{t('session.new_session')}</span>
+							<kbd>{shortcutLabel('n', { ctrl: true })}</kbd>
+						</button>
+						<button class="menu-item" role="menuitem" onclick={() => fromMenu(() => { quickPrefill = null; showQuickConnect = true; })}>
+							<FaIcon icon={faBolt} size={12} />
+							<span>{t('session.quick_connect')}</span>
+							<kbd>{shortcutLabel('n', { ctrl: true, shift: true })}</kbd>
+						</button>
+						<button class="menu-item" role="menuitem" onclick={() => fromMenu(() => { showRdpConnect = true; })}>
+							<FaIcon icon={faDesktop} size={12} />
+							<span>{t('session.rdp_connect')}</span>
+						</button>
+						<button class="menu-item" role="menuitem" onclick={() => fromMenu(() => contextNewFolder())}>
+							<FaIcon icon={faFolderPlus} size={12} />
+							<span>{t('session.new_folder')}</span>
+						</button>
+						<button class="menu-item" role="menuitem" onclick={() => fromMenu(() => { selectMode = true; })}>
+							<FaIcon icon={faListCheck} size={12} />
+							<span>{t('session.select_sessions')}</span>
+						</button>
+						<div class="menu-sep"></div>
+						<button class="menu-item" role="menuitem" onclick={() => fromMenu(() => (showImport = true))}>
+							<FaIcon icon={faFileImport} size={12} />
+							<span>{t('session.import_ssh_config')}</span>
+						</button>
+						<button class="menu-item" role="menuitem" onclick={() => fromMenu(() => (showRdpImport = true))}>
+							<FaIcon icon={faFileImport} size={12} />
+							<span>{t('session.import_rdp')}</span>
+						</button>
+					</div>
+				{/if}
+			</div>
+		</div>
+
+		{#if addressSuggestion}
+			<button class="connect-suggestion" onclick={connectToAddress}>
+				<FaIcon icon={faBolt} size={12} />
+				<span class="suggestion-text">
+					{t('session.connect_to_address', {
+						address: `${addressSuggestion.username ? addressSuggestion.username + '@' : ''}${addressSuggestion.host}${addressSuggestion.port ? ':' + addressSuggestion.port : ''}`
+					})}
+				</span>
+				{#if filteredSessions.length === 0}<kbd>↵</kbd>{/if}
+			</button>
+		{/if}
+
+		{#if searchRegex.error}
+			<p class="search-error" role="alert">{t('session.regex_error', { error: searchRegex.error })}</p>
+		{/if}
+
+		{#if selecting}
+			<div class="bulk-bar" role="toolbar" aria-label={t('session.selection')}>
+				<div class="bulk-head">
+					<span class="bulk-count">{t('session.selected_n', { count: String(selected.size) })}</span>
+					{#if selected.size < filteredSessions.length}
+						<button class="bulk-link" type="button" onclick={selectAllShown}>{t('session.select_all_n', { count: String(filteredSessions.length) })}</button>
+					{/if}
+					<button class="bulk-close" type="button" onclick={clearSelection} title={t('session.done_selecting')} aria-label={t('session.done_selecting')}>
+						<FaIcon icon={faXmark} size={11} />
+					</button>
+				</div>
+				<div class="bulk-actions">
+					<button class="bulk-btn primary" type="button" disabled={selected.size === 0} onclick={() => openMove([...selected])}>
+						<FaIcon icon={faFolderOpen} size={11} />
+						<span>{t('session.move_to')}</span>
+					</button>
+					<button class="bulk-btn danger" type="button" disabled={selected.size === 0} onclick={() => (bulkDeleteConfirm = true)}>{t('common.delete')}</button>
+				</div>
+			</div>
+		{:else if filteredSessions.length > 1 && searchQuery.trim()}
+			<!-- Only for a search: at rest it repeated the + menu's Select sessions on
+			     a row of its own, above the list it pushed down. -->
+			<div class="match-row">
+				<span>{t('session.matches_n', { count: String(filteredSessions.length) })}</span>
+				<span class="match-actions">
+					<button class="match-select" type="button" onclick={() => { selectMode = true; }}>{t('session.select_sessions')}</button>
+					<button class="match-select" type="button" onclick={selectAllShown}>{t('session.select_all')}</button>
+				</span>
+			</div>
+		{/if}
+
+		{#if loading}
+			<div class="loading-state"><span class="spinner"></span><span class="loading-text">{t('session.loading')}</span></div>
+		{:else if filteredSessions.length === 0 && folderTree.roots.length === 0}
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="empty-state-area" data-folder-id="__ungrouped__" class:drop-active={dropTarget === null && dragging} oncontextmenu={openBackgroundContextMenu}>
+				{#if creatingFolder}{@render newFolderRow()}{:else}<p class="empty-state">{searchQuery.trim() ? t('session.no_matches') : t('session.no_sessions_vault')}</p>{/if}
+			</div>
+		{:else}
+			{#if creatingFolder}{@render newFolderRow()}{/if}
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<!-- svelte-ignore a11y_click_events_have_key_events -->
+			<div class="sessions-scroll" data-folder-id="__ungrouped__" class:drop-active={dropTarget === null && dragging} oncontextmenu={openBackgroundContextMenu} onclick={closeContextMenu}>
+				{#if dragging}
+					<div class="no-folder-drop" data-folder-id="__ungrouped__" class:drop-active={dropTarget === null}><FaIcon icon={faFolder} size={12} /><span>{t('session.no_folder')}</span></div>
+				{/if}
+				{#each folderTree.roots as node (node.folder.id)}{@render folderNode(node)}{/each}
+				<div class="ungrouped-drop" data-folder-id="__ungrouped__">
+					{#each folderTree.ungrouped as session (session.id)}{@render sessionRow(session, -1)}{/each}
+				</div>
+			</div>
+		{/if}
+	{/if}
+	{#if contextMenu}
+		<ContextMenuBackdrop onclose={closeContextMenu} />
+		<div class="context-menu pop-in" use:positionMenu={{ x: contextMenu.x, y: contextMenu.y }}>
+			{#if contextMenu.session}
+				<button class="context-item" onclick={() => { if (contextMenu?.session) handleConnect(contextMenu.session); closeContextMenu(); }} type="button">
+					{t('session.connect')}
+				</button>
+				<button class="context-item" onclick={() => { if (contextMenu?.session) handleEdit(contextMenu.session); closeContextMenu(); }} type="button">
+					{t('session.edit')}
+				</button>
+				<div class="context-sep"></div>
+				<div class="context-label">{contextMenu.session && selected.has(contextMenu.session.id) && selected.size > 1 ? t('session.move_n_to_folder', { count: String(selected.size) }) : t('session.move_to_folder')}</div>
+				<!-- Scrollable so a large number of folders doesn't make the menu
+				     overflow the screen — caps at ~5 visible rows. -->
+				<div class="context-folders">
+					{#each folders as folder (folder.id)}
+						<button class="context-item context-folder-item" onclick={() => { if (contextMenu?.session) moveToFolder(contextMenu.session, folder.id); }} type="button">
+							<svg width="12" height="12" viewBox="0 0 24 24" fill="none" class="ctx-folder-icon">
+								<path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+							</svg>
+							{folderPath(folder.id, folders)}
+						</button>
+					{/each}
+				</div>
+				<button class="context-item context-folder-item" onclick={() => contextNewFolder()} type="button">
+					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" class="ctx-folder-icon">
+						<path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+					</svg>
+					{t('session.new_folder')}
+				</button>
+				{#if contextMenu.session.folder_id || (selected.has(contextMenu.session.id) && selected.size > 1)}
+					<button class="context-item" onclick={() => { if (contextMenu?.session) moveToFolder(contextMenu.session, null); }} type="button">
+						{t('session.remove_from_folder')}
+					</button>
+				{/if}
+				<div class="context-sep"></div>
+				{#if selected.has(contextMenu.session.id) && selected.size > 1}
+					<button class="context-item context-danger" onclick={() => { bulkDeleteConfirm = true; closeContextMenu(); }} type="button">
+						{t('session.delete_n', { count: String(selected.size) })}
+					</button>
+				{:else}
+					<button class="context-item context-danger" onclick={() => { if (contextMenu?.session) handleDelete(contextMenu.session); closeContextMenu(); }} type="button">
+						{t('common.delete')}
+					</button>
+				{/if}
+			{:else if contextMenu.folder}
+				<button class="context-item" onclick={() => contextNewFolder(contextMenu?.folder?.id ?? null)} type="button">{t('session.new_folder')}</button>
+				<div class="context-sep"></div>
+				<div class="context-label">{t('session.move_to_folder')}</div>
+				<div class="context-folders">
+					{#if contextMenu.folder.parent_id}<button class="context-item context-folder-item" onclick={() => { if (contextMenu?.folder) moveFolder(contextMenu.folder, null); }} type="button">{t('session.no_folder')}</button>{/if}
+					{#each folders.filter(folder => contextMenu?.folder && canMoveFolder(contextMenu.folder.id, folder.id, folders)) as folder (folder.id)}
+						<button class="context-item context-folder-item" onclick={() => { if (contextMenu?.folder) moveFolder(contextMenu.folder, folder.id); }} type="button">{folderPath(folder.id, folders)}</button>
+					{/each}
+				</div>
+				<div class="context-sep"></div>
+				<button class="context-item context-danger" onclick={() => { if (contextMenu?.folder) handleDeleteFolder(contextMenu.folder.id); closeContextMenu(); }} type="button">{t('common.delete')}</button>
+			{:else}
+				<button class="context-item" onclick={() => contextNewFolder()} type="button">{t('session.new_folder')}</button>
+			{/if}
+		</div>
+	{/if}
+</div>
+
+<Modal open={moveIds_ !== null} onclose={() => (moveIds_ = null)} title={t('session.move_n_title', { count: String(moveIds_?.length ?? 0) })} maxWidth="420px">
+	<div class="move-body">
+		{#if folders.length > 6}
+			<input class="move-filter" type="search" placeholder={t('session.move_filter')} aria-label={t('session.move_filter')} bind:value={moveFilter} />
+		{/if}
+		<div class="move-list" role="radiogroup" aria-label={t('session.move_to')}>
+			{#each moveFolders as folder (folder.id)}
+				<button type="button" role="radio" aria-checked={moveTarget === folder.id} class="move-option" class:chosen={moveTarget === folder.id} onclick={() => (moveTarget = folder.id)} ondblclick={() => { moveTarget = folder.id; void confirmMove(); }}>
+					<FaIcon icon={faFolder} size={12} />
+					<span class="move-name">{folderPath(folder.id, folders)}</span>
+					<span class="move-count">{sessions.filter(s => s.folder_id === folder.id).length}</span>
+				</button>
+			{/each}
+			{#if moveFolders.length === 0 && moveFilter.trim()}
+				<p class="move-empty">{t('session.no_matches')}</p>
+			{/if}
+		</div>
+		<div class="move-extra">
+			<button type="button" role="radio" aria-checked={moveTarget === NEW_FOLDER} class="move-option" class:chosen={moveTarget === NEW_FOLDER} onclick={() => (moveTarget = NEW_FOLDER)}>
+				<FaIcon icon={faFolderPlus} size={12} />
+				<span class="move-name">{t('session.new_folder')}</span>
+			</button>
+			{#if moveTarget === NEW_FOLDER}
+				<!-- svelte-ignore a11y_autofocus -->
+				<input class="move-filter" type="text" autofocus placeholder={t('session.folder_name')} aria-label={t('session.folder_name')} bind:value={moveNewName} onkeydown={(e) => e.key === 'Enter' && void confirmMove()} />
+			{/if}
+			{#if sessions.some(s => moveIds_?.includes(s.id) && s.folder_id)}
+				<button type="button" role="radio" aria-checked={moveTarget === null} class="move-option" class:chosen={moveTarget === null} onclick={() => (moveTarget = null)}>
+					<span class="move-name">{t('session.remove_from_folder')}</span>
+				</button>
+			{/if}
+		</div>
+	</div>
+	{#snippet actions()}
+		<Button variant="ghost" onclick={() => (moveIds_ = null)}>{t('common.cancel')}</Button>
+		<Button variant="primary" disabled={moveTarget === undefined || (moveTarget === NEW_FOLDER && !moveNewName.trim())} onclick={() => void confirmMove()}>
+			{t('session.move_n', { count: String(moveIds_?.length ?? 0) })}
+		</Button>
+	{/snippet}
+</Modal>
+
+{#if bulkDeleteConfirm}
+	<!-- Deleting several sessions reaches every device the vault syncs to:
+	     the names are listed and the count typed, as for other bulk deletes. -->
+	<ConfirmAction
+		open={bulkDeleteConfirm}
+		title={t('session.delete_n', { count: String(selected.size) })}
+		message={t('session.delete_n_message', { count: String(selected.size) })}
+		items={sessions.filter(s => selected.has(s.id)).map(s => `${s.name} (${s.username ? s.username + '@' : ''}${s.host})`)}
+		where={selectedVaultId === ALL_VAULTS ? t('vault.all_vaults') : selectedVaultId ? (vaultState.vaults.get(selectedVaultId)?.name ?? t('vault.private')) : t('vault.private')}
+		environment="none"
+		confirmLabel={t('session.delete_n', { count: String(selected.size) })}
+		typeToConfirm={t('session.delete_n_typed', { count: String(selected.size) })}
+		onconfirm={() => void deleteSelected()}
+		onclose={() => (bulkDeleteConfirm = false)}
+	/>
+{/if}
+
+<QuickConnect bind:open={showQuickConnect} prefill={quickPrefill} />
+<RdpQuickConnect bind:open={showRdpConnect} />
+<SessionEditor bind:open={showEditor} editSession={editingSession} vaultId={targetVaultId} {folders} onsave={handleEditorSave} />
+<SshConfigImport bind:open={showImport} vaultId={targetVaultId} onsave={handleEditorSave} />
+<RdpImport bind:open={showRdpImport} vaultId={targetVaultId} onsave={handleEditorSave} />
+<UntrustedRefsDialog
+	asked={askedRefs}
+	busy={approvingRefs}
+	error={approveRefsError}
+	onallow={() => void allowAskedRefs()}
+	oncancel={() => { if (!approvingRefs) finishAsking(false); }}
+/>
+
+{#if showConnectPrompt && connectSession}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="prompt-overlay" onkeydown={(e) => { if (e.key === 'Escape') cancelConnect(); }} onclick={cancelConnect}>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="prompt-box" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+			<div class="prompt-header">
+				<span class="prompt-title">{t('session.connect_to', { name: connectSession.name })}</span>
+				<span class="prompt-detail">{connectSession.username}@{connectSession.host}:{connectSession.port}</span>
+			</div>
+
+			<form class="prompt-form" onsubmit={(e) => { e.preventDefault(); doConnect(); }}>
+				{#if passwordFallback}
+					<div class="fallback-hint">{t('session.fallback_to_password')}</div>
+					<input
+						class="prompt-input"
+						type="password"
+						placeholder={t('session.password')}
+						bind:value={fallbackPassword}
+						bind:this={fallbackInputEl}
+						disabled={connecting}
+					/>
+				{:else if connectSession.auth_method.type === 'Password'}
+					<input
+						class="prompt-input"
+						type="password"
+						placeholder={t('session.password')}
+						bind:value={connectPassword}
+						disabled={connecting}
+					/>
+				{:else if connectSession.auth_method.type === 'Key'}
+					<input
+						class="prompt-input"
+						type="password"
+						placeholder={t('session.key_passphrase_optional')}
+						bind:value={connectKeyPassphrase}
+						disabled={connecting}
+					/>
+				{/if}
+
+				{#if !passwordFallback && promptRef(connectSession)}
+					{@const ref = promptRef(connectSession)!}
+					<div class="fallback-hint">{t('pwmanager.prompt_uses_ref', { name: `${providerName(ref.provider)} · ${ref.label?.trim() || ref.entry_id}` })}</div>
+				{/if}
+
+				{#if connectSession.auth_method.type !== 'Agent' && !passwordFallback}
+					<label class="remember-label">
+						<input type="checkbox" class="remember-check" bind:checked={rememberPassword} disabled={connecting} />
+						<span class="remember-text">{hasSavedPassword ? t('session.password_saved') : t('session.remember_password')}</span>
+					</label>
+				{/if}
+
+				<!-- Where the connection has got to, and on a failure, which step broke. -->
+				<ConnectSteps id={connectingId} active={connecting} failed={!connecting && !!connectError} />
+
+				{#if connectError}
+					<div class="prompt-error">{connectError}</div>
+				{/if}
+
+				<div class="prompt-actions">
+					<button type="button" class="prompt-btn prompt-cancel" onclick={cancelConnect}>{t('common.cancel')}</button>
+					<button type="submit" class="prompt-btn prompt-connect" disabled={connecting}>
+						{#if connecting}{t('session.connecting')}{:else if passwordFallback}{t('session.try_with_password')}{:else}{t('session.connect')}{/if}
+					</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
+
+
+<style>
+	.session-list {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 4px 0;
+		height: 100%;
+		overflow: hidden;
+	}
+
+	/* Three equal columns forced "Import SSH Config" to wrap onto three lines and
+	   pushed all three buttons to 61px tall. Quick Connect is the primary action,
+	   so it gets its own full-width row and the two secondary actions share the
+	   next one — the sidebar has vertical room to spare. */
+	.tool-row {
+		display: flex;
+		align-items: stretch;
+		gap: 4px;
+	}
+
+	.tool-row .search-row {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.add-wrap {
+		position: relative;
+		flex-shrink: 0;
+	}
+
+	.add-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 30px;
+		height: 100%;
+		min-height: 30px;
+		padding: 0;
+		border: 1px solid var(--color-border);
+		border-radius: 6px;
+		background: transparent;
+		color: var(--color-accent);
+		cursor: pointer;
+		transition:
+			background-color var(--duration-default) var(--ease-default),
+			border-color var(--duration-default) var(--ease-default);
+	}
+
+	.add-btn:hover,
+	.add-btn.open {
+		background-color: rgba(0, 122, 255, 0.1);
+		border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-border));
+	}
+
+	.add-btn:focus-visible {
+		outline: 2px solid var(--color-accent);
+		outline-offset: 1px;
+	}
+
+	.add-menu {
+		position: absolute;
+		right: 0;
+		top: calc(100% + 4px);
+		z-index: 30;
+		min-width: 200px;
+		/* Scrolls within a short window, as a phone on its side is. */
+		max-height: calc(100dvh - 120px);
+		overflow-y: auto;
+		padding: 4px;
+		background: var(--color-bg-elevated);
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+		box-shadow: var(--shadow-elevated, 0 8px 32px rgba(0, 0, 0, 0.35));
+	}
+
+	.menu-item {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		width: 100%;
+		padding: 7px 10px;
+		border: none;
+		border-radius: 5px;
+		background: transparent;
+		color: var(--color-text-secondary);
+		cursor: pointer;
+		text-align: left;
+		font-family: inherit;
+		font-size: var(--text-sm);
+		white-space: nowrap;
+	}
+
+	.menu-item:hover,
+	.menu-item:focus-visible {
+		background: var(--color-surface-hover);
+		color: var(--color-text-primary);
+		outline: none;
+	}
+
+	.menu-item span {
+		flex: 1;
+	}
+
+	.menu-item kbd,
+	.connect-suggestion kbd {
+		font-family: var(--font-mono, monospace);
+		font-size: var(--text-2xs);
+		color: var(--color-text-tertiary);
+	}
+
+	.menu-sep {
+		height: 1px;
+		margin: 4px 6px;
+		background: var(--color-border);
+	}
+
+	/* "Connect to root@10.0.0.7": offered, never assumed. */
+	.connect-suggestion {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		padding: 7px 10px;
+		border: 1px solid color-mix(in srgb, var(--color-accent) 40%, var(--color-border));
+		border-radius: 6px;
+		background: rgba(0, 122, 255, 0.08);
+		color: var(--color-accent);
+		cursor: pointer;
+		text-align: left;
+		font-family: inherit;
+		font-size: var(--text-sm);
+	}
+
+	.connect-suggestion:hover {
+		background: rgba(0, 122, 255, 0.14);
+	}
+
+	.suggestion-text {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.search-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 4px 8px;
+		background: var(--color-bg-primary);
+		border: 1px solid var(--color-border);
+		border-radius: 6px;
+	}
+
+	.search-row:focus-within {
+		border-color: var(--color-accent);
+	}
+
+	.search-icon {
+		flex-shrink: 0;
+		color: var(--color-text-secondary);
+		opacity: 0.5;
+	}
+
+	.search-input {
+		flex: 1;
+		min-width: 0;
+		padding: 3px 0;
+		border: none;
+		background: transparent;
+		color: var(--color-text-primary);
+		font-family: var(--font-sans);
+		font-size: var(--text-sm);
+		outline: none;
+	}
+
+	.search-input::placeholder {
+		color: var(--color-text-secondary);
+		opacity: 0.5;
+	}
+
+	.search-clear {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 18px;
+		height: 18px;
+		border: none;
+		border-radius: 4px;
+		background: transparent;
+		color: var(--color-text-secondary);
+		cursor: pointer;
+		flex-shrink: 0;
+	}
+
+	.search-clear:hover {
+		background: var(--color-surface-hover);
+		color: var(--color-text-primary);
+	}
+
+
+	.new-folder-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 6px 8px;
+		background: var(--color-surface-hover);
+		border-radius: 6px;
+		border: 1px solid var(--color-border);
+	}
+
+	.new-folder-icon {
+		flex-shrink: 0;
+		color: var(--color-warning, var(--color-warning));
+		opacity: 0.7;
+	}
+
+	.new-folder-parent {
+		max-width: 35%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: var(--text-xs);
+		color: var(--color-text-secondary);
+	}
+
+	/* The input gives way, not the row: at its own width it pushed Save and
+	   Cancel off a phone's screen. */
+	.new-folder-form {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		flex: 1;
+		min-width: 0;
+	}
+
+	.new-folder-input {
+		flex: 1;
+		width: 0;
+		min-width: 0;
+		padding: 5px 10px;
+		border: 1px solid var(--color-border);
+		border-radius: 5px;
+		background: var(--color-bg-primary);
+		color: var(--color-text-primary);
+		font-family: var(--font-sans);
+		font-size: var(--text-sm);
+		outline: none;
+	}
+
+	.new-folder-input:focus {
+		border-color: var(--color-accent);
+	}
+
+	.new-folder-save,
+	.new-folder-cancel {
+		padding: 4px 8px;
+		font-family: var(--font-sans);
+		font-size: var(--text-xs);
+		font-weight: 500;
+		border: none;
+		border-radius: 4px;
+		cursor: pointer;
+	}
+
+	.new-folder-save {
+		background: var(--color-accent);
+		color: #fff;
+	}
+
+	.new-folder-save:disabled {
+		opacity: 0.4;
+		cursor: default;
+	}
+
+	.new-folder-cancel {
+		background: transparent;
+		color: var(--color-text-secondary);
+	}
+
+	.folder-node {
+		min-width: 0;
+		flex-shrink: 0;
+	}
+
+	.folder-header {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		padding: 5px 6px;
+		border-radius: 6px;
+		transition: background-color 0.15s ease, outline 0.15s ease;
+	}
+
+	.folder-toggle {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		gap: 5px;
+		padding: 2px 4px;
+		border: none;
+		border-radius: 4px;
+		background: transparent;
+		color: var(--color-text-secondary);
+		font-family: var(--font-sans);
+		font-size: var(--text-sm);
+		cursor: pointer;
+		pointer-events: auto;
+		transition: background-color var(--duration-default) var(--ease-default);
+	}
+
+	.folder-toggle:hover {
+		background-color: var(--color-surface-hover);
+	}
+
+	.folder-chevron {
+		transition: transform 0.15s ease;
+		transform: rotate(90deg);
+	}
+
+	.folder-chevron.collapsed {
+		transform: rotate(0deg);
+	}
+
+	.folder-icon {
+		color: var(--color-warning, var(--color-warning));
+		opacity: 0.7;
+	}
+
+	.folder-name {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-weight: 500;
+		color: var(--color-text-primary);
+	}
+
+	.folder-count {
+		font-size: var(--text-2xs);
+		color: var(--color-text-secondary);
+		opacity: 0.6;
+	}
+
+	.folder-menu-btn,
+	.folder-delete-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 20px;
+		height: 20px;
+		border: none;
+		border-radius: 4px;
+		background: transparent;
+		color: var(--color-text-secondary);
+		cursor: pointer;
+		opacity: 0.15;
+		transition: opacity 0.15s ease, background-color 0.15s ease;
+	}
+
+	.folder-header:hover .folder-menu-btn,
+	.folder-header:hover .folder-delete-btn,
+	.folder-header:focus-within .folder-menu-btn,
+	.folder-header:focus-within .folder-delete-btn {
+		opacity: 1;
+	}
+
+	/* With a mouse, a folder's buttons are not shown until it is pointed at:
+	   faint on every row they were noise down the whole list. */
+	@media (pointer: fine) {
+		.folder-menu-btn,
+		.folder-delete-btn {
+			opacity: 0;
+		}
+	}
+
+	.folder-menu-btn:hover {
+		background: var(--color-surface-hover);
+	}
+
+	.folder-delete-btn:hover {
+		background: rgba(255, 69, 58, 0.12);
+		color: var(--color-danger);
+	}
+
+	.folder-session {
+		padding-left: 12px;
+	}
+
+	.context-menu {
+		position: fixed;
+		min-width: 180px;
+		max-width: 280px;
+		padding: 4px 0;
+		background-color: var(--color-bg-elevated, var(--color-bg-elevated));
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+		box-shadow: var(--shadow-elevated);
+		z-index: 1000;
+	}
+
+	/* Folder list scrolls so a huge number of folders can't blow out the menu
+	   height — ~5 rows visible, the rest reachable by scrolling. */
+	.context-folders {
+		max-height: 150px;
+		overflow-y: auto;
+	}
+
+	.context-item {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		padding: 6px 12px;
+		border: none;
+		background: transparent;
+		color: var(--color-text-primary);
+		font-family: var(--font-sans);
+		font-size: var(--text-sm);
+		cursor: pointer;
+		text-align: left;
+		transition: background-color 0.1s ease;
+	}
+
+	.context-item:hover {
+		background-color: var(--color-surface-hover);
+	}
+
+	.context-folder-item {
+		padding-left: 20px;
+	}
+
+	.context-danger {
+		color: var(--color-danger, var(--color-danger));
+	}
+
+	.context-danger:hover {
+		background-color: rgba(255, 69, 58, 0.12);
+	}
+
+	.context-label {
+		padding: 4px 12px 2px;
+		font-size: var(--text-xs);
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--color-text-secondary);
+		opacity: 0.6;
+	}
+
+	.ctx-folder-icon {
+		color: var(--color-warning, var(--color-warning));
+		opacity: 0.7;
+		flex-shrink: 0;
+	}
+
+	.context-sep {
+		height: 1px;
+		margin: 4px 0;
+		background-color: var(--color-border);
+	}
+
+
+	.no-folder-drop {
+		display: flex;
+		align-items: center;
+		gap: 7px;
+		min-height: 38px;
+		padding: 7px 12px;
+		border: 1px dashed var(--color-border);
+		border-radius: 6px;
+		color: var(--color-text-secondary);
+		font-size: var(--text-sm);
+		flex-shrink: 0;
+	}
+
+	.ungrouped-drop {
+		min-height: 2px;
+		flex-shrink: 0;
+	}
+
+	.sessions-scroll {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		overflow-y: auto;
+		/* Nothing here scrolls sideways; a 3px overflow must not grow a bar. */
+		overflow-x: hidden;
+		flex: 1;
+		min-height: 60px;
+	}
+
+	/* A short window (a phone on its side): the whole panel scrolls as one.
+	   Split between a fixed header and a list that would not go under 60px,
+	   the sessions ran off the bottom where nothing could reach them. */
+	@media (max-height: 480px) {
+		.session-list {
+			overflow-y: auto;
+		}
+
+		.sessions-scroll {
+			flex: none;
+			min-height: auto;
+			overflow: visible;
+		}
+	}
+
+	.drop-active {
+		outline: 2px dashed rgba(100, 160, 255, 0.5);
+		outline-offset: -2px;
+		background-color: rgba(100, 160, 255, 0.04);
+		border-radius: 4px;
+	}
+
+	.loading-state {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		padding: 16px 0;
+	}
+
+	.loading-text {
+		font-size: var(--text-sm);
+		color: var(--color-text-secondary);
+	}
+
+	.empty-state-area {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 10px;
+		padding: 16px 4px;
+		flex: 1;
+	}
+
+	.empty-state {
+		margin: 0;
+		padding: 0;
+		font-size: var(--text-sm);
+		color: var(--color-text-secondary);
+		opacity: 0.7;
+		text-align: center;
+	}
+
+	.delete-confirm {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 6px 8px;
+		background-color: rgba(255, 69, 58, 0.06);
+		border: 1px solid rgba(255, 69, 58, 0.15);
+		border-radius: var(--radius-card, 8px);
+	}
+
+	.delete-confirm-text {
+		flex: 1;
+		font-size: var(--text-sm);
+		color: var(--color-danger);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.delete-confirm-btn,
+	.delete-cancel-btn {
+		flex-shrink: 0;
+		padding: 3px 8px;
+		font-family: var(--font-sans);
+		font-size: var(--text-sm);
+		font-weight: 500;
+		border: none;
+		border-radius: 4px;
+		cursor: pointer;
+		transition:
+			background-color var(--duration-default) var(--ease-default),
+			opacity var(--duration-default) var(--ease-default);
+	}
+
+	.delete-confirm-btn {
+		background-color: var(--color-danger);
+		color: #fff;
+	}
+
+	.delete-confirm-btn:hover {
+		opacity: 0.85;
+	}
+
+	.delete-cancel-btn {
+		background-color: var(--color-surface-hover);
+		color: var(--color-text-secondary);
+	}
+
+	.delete-cancel-btn:hover {
+		background-color: var(--color-surface-active);
+	}
+
+	.spinner {
+		display: inline-block;
+		width: 14px;
+		height: 14px;
+		border: 2px solid var(--color-border);
+		border-top-color: var(--color-accent);
+		border-radius: 50%;
+		animation: spin 0.6s linear infinite;
+	}
+
+	@keyframes spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+
+	/* Connect prompt overlay */
+	.prompt-overlay {
+		position: fixed;
+		inset: 0;
+		/* Clear of the phone's status and navigation bars (0 on a desktop). */
+		padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+		z-index: 200;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--color-surface-sunken);
+		backdrop-filter: blur(4px);
+	}
+
+	.prompt-box {
+		width: 320px;
+		background-color: var(--color-bg-elevated);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-card);
+		box-shadow: var(--shadow-elevated);
+		overflow: hidden;
+	}
+
+	.prompt-header {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 14px 16px 10px;
+		border-bottom: 1px solid var(--color-border);
+	}
+
+	.prompt-title {
+		font-size: var(--text-md);
+		font-weight: 600;
+		color: var(--color-text-primary);
+	}
+
+	.prompt-detail {
+		font-size: var(--text-sm);
+		color: var(--color-text-secondary);
+		font-family: var(--font-mono);
+	}
+
+	.prompt-form {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		padding: 12px 16px 14px;
+	}
+
+	.prompt-input {
+		width: 100%;
+		padding: 8px 10px;
+		font-family: var(--font-sans);
+		font-size: var(--text-md);
+		color: var(--color-text-primary);
+		background-color: var(--color-bg-primary);
+		border: 1px solid var(--color-border);
+		border-radius: 6px;
+		outline: none;
+		box-sizing: border-box;
+		transition: border-color var(--duration-default) var(--ease-default);
+	}
+
+	.prompt-input:focus {
+		border-color: var(--color-accent);
+	}
+
+	.remember-label {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		cursor: pointer;
+	}
+
+	.remember-check {
+		width: 14px;
+		height: 14px;
+		accent-color: var(--color-accent);
+		cursor: pointer;
+	}
+
+	.remember-check:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.remember-text {
+		font-size: var(--text-sm);
+		color: var(--color-text-secondary);
+	}
+
+	.fallback-hint {
+		padding: 6px 10px;
+		font-size: var(--text-sm);
+		color: var(--color-text-secondary);
+		background-color: rgba(10, 132, 255, 0.08);
+		border: 1px solid rgba(10, 132, 255, 0.2);
+		border-radius: 4px;
+		line-height: 1.4;
+	}
+
+	.prompt-error {
+		padding: 6px 10px;
+		font-size: var(--text-sm);
+		color: var(--color-danger);
+		background-color: rgba(255, 69, 58, 0.08);
+		border-radius: 4px;
+	}
+
+	.prompt-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 6px;
+	}
+
+	.prompt-btn {
+		padding: 6px 14px;
+		font-family: var(--font-sans);
+		font-size: var(--text-sm);
+		font-weight: 500;
+		border: none;
+		border-radius: 6px;
+		cursor: pointer;
+		transition: background-color var(--duration-default) var(--ease-default);
+	}
+
+	.prompt-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.prompt-cancel {
+		background: transparent;
+		color: var(--color-text-secondary);
+	}
+
+	.prompt-cancel:hover:not(:disabled) {
+		background-color: var(--color-surface-hover);
+	}
+
+	.prompt-connect {
+		background-color: var(--color-accent);
+		color: #fff;
+	}
+
+	.prompt-connect:hover:not(:disabled) {
+		background-color: var(--color-accent-hover);
+	}
+
+	/* Init section (first run) */
+	.init-section {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 12px;
+		padding: 24px 16px;
+		text-align: center;
+	}
+
+	.init-icon {
+		color: var(--color-text-secondary);
+		opacity: 0.6;
+	}
+
+	.init-icon.error {
+		color: var(--color-danger);
+		opacity: 1;
+	}
+
+	.import-input {
+		width: 100%;
+		max-width: 240px;
+		padding: 8px 12px;
+		font-family: var(--font-mono);
+		font-size: var(--text-sm);
+		color: var(--color-text-primary);
+		background: var(--color-bg-primary);
+		border: 1px solid var(--color-border);
+		border-radius: 6px;
+		outline: none;
+	}
+
+	.import-input:focus {
+		border-color: var(--color-accent);
+	}
+
+	.recovery-buttons {
+		display: flex;
+		gap: 8px;
+	}
+
+	.reset-btn {
+		padding: 8px 16px;
+		font-family: var(--font-sans);
+		font-size: var(--text-sm);
+		font-weight: 500;
+		color: var(--color-text-secondary);
+		background: transparent;
+		border: 1px solid var(--color-border);
+		border-radius: 6px;
+		cursor: pointer;
+		transition: background-color var(--duration-default) var(--ease-default);
+	}
+
+	.reset-btn:hover:not(:disabled) {
+		background-color: var(--color-surface-hover);
+	}
+
+	.reset-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.init-title {
+		margin: 0;
+		font-size: var(--text-md);
+		font-weight: 600;
+		color: var(--color-text-primary);
+	}
+
+	.init-desc {
+		margin: 0;
+		font-size: var(--text-sm);
+		color: var(--color-text-secondary);
+		max-width: 200px;
+		line-height: 1.4;
+	}
+
+	.init-error {
+		margin: 0;
+		font-size: var(--text-sm);
+		color: var(--color-danger);
+	}
+
+	.init-btn {
+		padding: 8px 20px;
+		font-family: var(--font-sans);
+		font-size: var(--text-sm);
+		font-weight: 500;
+		color: #fff;
+		background-color: var(--color-accent);
+		border: none;
+		border-radius: 6px;
+		cursor: pointer;
+		transition: background-color var(--duration-default) var(--ease-default);
+	}
+
+	.init-btn:hover:not(:disabled) {
+		background-color: var(--color-accent-hover);
+	}
+
+	.init-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.search-error {
+		margin: 4px 4px 0;
+		font-size: 0.6875rem;
+		color: var(--color-danger, #ff453a);
+		overflow-wrap: anywhere;
+	}
+
+	.match-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		margin: 6px 4px 2px;
+		font-size: 0.6875rem;
+		color: var(--color-text-secondary);
+	}
+
+	.match-actions {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.match-select {
+		border: none;
+		background: none;
+		padding: 2px 4px;
+		font: inherit;
+		color: var(--color-text-tertiary);
+		cursor: pointer;
+		transition: color var(--duration-default) var(--ease-default);
+	}
+
+	.match-select:hover,
+	.match-select:focus-visible {
+		color: var(--color-accent);
+	}
+
+	.bulk-bar {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		margin: 6px 0 4px;
+		padding: 6px 8px;
+		border-radius: 8px;
+		background: color-mix(in srgb, var(--color-accent) 12%, var(--color-bg-secondary));
+		border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+	}
+
+	.bulk-head {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+
+	.bulk-count {
+		font-size: 0.75rem;
+		font-weight: 600;
+		margin-right: auto;
+	}
+
+	.bulk-link {
+		border: none;
+		background: none;
+		padding: 2px 4px;
+		font: inherit;
+		font-size: 0.6875rem;
+		color: var(--color-accent);
+		cursor: pointer;
+	}
+
+	.bulk-actions {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 6px;
+	}
+
+	.bulk-actions .bulk-btn {
+		justify-content: center;
+	}
+
+	.bulk-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		min-height: 26px;
+		padding: 3px 9px;
+		border-radius: 6px;
+		border: 1px solid var(--color-border);
+		background: var(--color-bg-elevated);
+		color: var(--color-text-primary);
+		font-size: 0.75rem;
+		cursor: pointer;
+	}
+
+	.bulk-btn:disabled {
+		opacity: 0.45;
+		cursor: default;
+	}
+
+	.bulk-btn.primary {
+		background: var(--color-accent);
+		border-color: var(--color-accent);
+		color: #fff;
+	}
+
+	.bulk-btn.danger {
+		color: var(--color-danger, #ff453a);
+	}
+
+	.bulk-close {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 26px;
+		height: 26px;
+		border: none;
+		border-radius: 6px;
+		background: none;
+		color: var(--color-text-secondary);
+		cursor: pointer;
+	}
+
+	.bulk-close:hover {
+		background: var(--color-surface-hover);
+	}
+
+
+	@media (pointer: coarse) {
+		.bulk-btn,
+		.bulk-close {
+			min-height: 36px;
+		}
+
+		.bulk-close {
+			width: 36px;
+		}
+	}
+
+	.move-body {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.move-filter {
+		width: 100%;
+		box-sizing: border-box;
+		min-height: 32px;
+		padding: 5px 9px;
+		border-radius: 6px;
+		border: 1px solid var(--color-border);
+		background: var(--color-bg-secondary);
+		color: var(--color-text-primary);
+		font: inherit;
+		font-size: 0.8125rem;
+	}
+
+	.move-list {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		max-height: min(320px, 45vh);
+		overflow-y: auto;
+	}
+
+	.move-extra {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding-top: 6px;
+		border-top: 1px solid var(--color-border);
+	}
+
+	.move-option {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		min-height: 34px;
+		padding: 6px 10px;
+		border: 1px solid transparent;
+		border-radius: 6px;
+		background: none;
+		color: var(--color-text-primary);
+		font: inherit;
+		font-size: 0.8125rem;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.move-option:hover {
+		background: var(--color-surface-hover);
+	}
+
+	.move-option.chosen {
+		border-color: var(--color-accent);
+		background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+	}
+
+	.move-name {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.move-count {
+		font-size: 0.6875rem;
+		color: var(--color-text-tertiary);
+	}
+
+	.move-empty {
+		margin: 4px 2px;
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
+	}
+
+	@media (pointer: coarse) {
+		.move-option { min-height: 44px; }
+		.folder-header { min-height: 44px; }
+		.folder-menu-btn { width: 36px; height: 36px; opacity: 1; }
+		.folder-delete-btn { display: none; }
+	}
+</style>

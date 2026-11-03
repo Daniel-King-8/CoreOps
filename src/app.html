@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en" class="dark">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<link rel="icon" href="%sveltekit.assets%/favicon.png" />
+		<title>CoreOps</title>
+		<style>
+			body { margin: 0; background: #0a0a0a; }
+			#preloader {
+				position: fixed;
+				inset: 0;
+				z-index: 9999;
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				gap: 20px;
+				background: #0a0a0a;
+				transition: opacity 0.4s ease, visibility 0.4s ease;
+				-webkit-user-select: none;
+				user-select: none;
+				cursor: default;
+			}
+			/* Let mousedown reach the drag-region container anywhere on the splash. */
+			#preloader > * { pointer-events: none; }
+			#preloader.hidden {
+				opacity: 0;
+				visibility: hidden;
+				pointer-events: none;
+			}
+			#preloader .logo {
+				width: 56px;
+				height: 56px;
+				opacity: 0;
+				animation: logoIn 0.6s ease 0.1s forwards;
+			}
+			#preloader .app-name {
+				font-family: 'Inter', system-ui, -apple-system, sans-serif;
+				font-size: 15px;
+				font-weight: 500;
+				letter-spacing: 0.5px;
+				color: #86868b;
+				opacity: 0;
+				animation: logoIn 0.5s ease 0.3s forwards;
+			}
+			#preloader .loader {
+				width: 24px;
+				height: 24px;
+				border: 2px solid rgba(255,255,255,0.06);
+				border-top-color: #0a84ff;
+				border-radius: 50%;
+				opacity: 0;
+				animation: logoIn 0.4s ease 0.5s forwards, spin 0.8s linear 0.5s infinite;
+			}
+			@keyframes logoIn {
+				to { opacity: 1; }
+			}
+			@keyframes spin {
+				to { transform: rotate(360deg); }
+			}
+		</style>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div id="preloader" data-tauri-drag-region>
+			<img class="logo" src="%sveltekit.assets%/app-icon.png" alt="CoreOps" />
+			<span class="app-name">CoreOps</span>
+			<div class="loader"></div>
+		</div>
+		<script>
+			// Fade out the splash exactly when the app reports it has mounted and
+			// finished its initial load (the `app-ready` event dispatched from the
+			// root layout's onMount) — no timer, no fake delay. The element is
+			// removed only after its fade-out transition ends.
+			window.addEventListener(
+				'app-ready',
+				function () {
+					var p = document.getElementById('preloader');
+					if (!p) return;
+					p.addEventListener('transitionend', function () { p.remove(); }, { once: true });
+					p.classList.add('hidden');
+				},
+				{ once: true }
+			);
+		</script>
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

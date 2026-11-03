@@ -1,0 +1,20 @@
+== plain.test
+# Host plain.test found: line 1 
+plain.test ED25519 SHA256:NBqJO3ad9bU5KIVqbUHHsOGm2+DqDDiIqxFJOrgWZRk c1
+== 192.0.2.7
+# Host 192.0.2.7 found: line 2 
+192.0.2.7 ED25519 SHA256:NBqJO3ad9bU5KIVqbUHHsOGm2+DqDDiIqxFJOrgWZRk c1
+== [port.test]:2200
+# Host [port.test]:2200 found: line 3 
+[port.test]:2200 ECDSA SHA256:wvOF0JpAoHa7Qw296gE5do1I8XJsRrxv8k0ET1NyMSU
+== mixed.case.test
+# Host mixed.case.test found: line 4 
+mixed.case.test RSA SHA256:HQMJb8E5kL56CbHkt4TzOPHxZ5zkEkepZ518IgRTDsg
+== Mixed.Case.Test
+== x.wild.test
+# Host x.wild.test found: line 5 
+x.wild.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== x.ca.test
+# Host x.ca.test found: line 6 CA
+x.ca.test ED25519 SHA256:sN8omCr+pNjMleaIOe+F5VO1PVjA58v79iIOlV6EypQ
+== other.test

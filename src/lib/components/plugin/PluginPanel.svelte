@@ -1,0 +1,418 @@
+<script lang="ts">
+	import PluginListItem from './PluginListItem.svelte';
+	import PluginView from './PluginView.svelte';
+	import MarketplacePanel from './MarketplacePanel.svelte';
+	import {
+		pluginDiscover,
+		pluginLoad,
+		pluginUnload,
+		pluginList,
+		pluginSetConfig,
+		type PluginInfo,
+		type PluginConfig
+	} from '#lib/ipc/plugin.js';
+	import {
+		getPlugins,
+		setPlugins,
+		getDiscoveredManifests,
+		setDiscoveredManifests,
+		getActivePluginId,
+		setActivePluginId,
+		getLoading,
+		setLoading,
+		getError,
+		setError
+	} from '#lib/state/plugin.svelte.js';
+	import { addToast } from '#lib/state/toasts.svelte.js';
+	import { t } from '#lib/state/i18n.svelte.js';
+	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+	import { onMount } from 'svelte';
+
+	interface Props {
+		connectionId: string | undefined;
+	}
+
+	let { connectionId }: Props = $props();
+
+	let discovering = $state(false);
+	let activeTab = $state<'installed' | 'marketplace'>('installed');
+
+	let plugins = $derived(getPlugins());
+	let activePluginId = $derived(getActivePluginId());
+	let loading = $derived(getLoading());
+
+	let selectedPlugin = $derived(
+		activePluginId ? plugins.find((p) => p.manifest.id === activePluginId) : undefined
+	);
+
+	async function discoverPlugins(): Promise<void> {
+		discovering = true;
+		setLoading(true);
+		setError(null);
+
+		try {
+			const manifests = await pluginDiscover();
+			setDiscoveredManifests(manifests);
+
+			for (const manifest of manifests) {
+				try {
+					await pluginLoad(manifest.id);
+				} catch (err) {
+					console.error(`Failed to load plugin ${manifest.id}:`, err);
+				}
+			}
+
+			await refreshPlugins();
+		} catch (err) {
+			setError(String(err));
+			addToast(String(err), 'error');
+		} finally {
+			setLoading(false);
+			discovering = false;
+		}
+	}
+
+	async function refreshPlugins(): Promise<void> {
+		try {
+			const list = await pluginList();
+			setPlugins(list);
+		} catch (err) {
+			setError(String(err));
+			addToast(String(err), 'error');
+		}
+	}
+
+	async function handleToggle(pluginId: string, enabled: boolean): Promise<void> {
+		const plugin = plugins.find((p) => p.manifest.id === pluginId);
+		if (!plugin) return;
+
+		const config: PluginConfig = {
+			id: pluginId,
+			enabled,
+			grantedPermissions: plugin.manifest.permissions
+		};
+
+		try {
+			await pluginSetConfig(config);
+
+			if (enabled) {
+				await pluginLoad(pluginId);
+			} else {
+				await pluginUnload(pluginId);
+			}
+
+			await refreshPlugins();
+		} catch (err) {
+			addToast(String(err), 'error');
+		}
+	}
+
+	function handlePluginClick(pluginId: string): void {
+		if (activePluginId === pluginId) {
+			setActivePluginId(null);
+		} else {
+			setActivePluginId(pluginId);
+		}
+	}
+
+	onMount(() => {
+		let unlistenNotify: UnlistenFn | undefined;
+		let unlistenStatus: UnlistenFn | undefined;
+
+		// Silently load current plugin list without loading flash
+		pluginList()
+			.then((list) => setPlugins(list))
+			.catch(() => {});
+
+		listen<{ pluginId: string; message: string; level?: string }>('plugin-notify', (event) => {
+			const { message, level } = event.payload;
+			const toastType = level === 'error' ? 'error' : level === 'warning' ? 'warning' : 'info';
+			addToast(message, toastType);
+		}).then((fn) => {
+			unlistenNotify = fn;
+		});
+
+		// A plugin's hook timed out or errored — surface it and refresh the
+		// list so the row's status badge flips to Error.
+		listen<{ pluginId: string; status: string; message: string }>(
+			'plugin-status-update',
+			(event) => {
+				const { pluginId, message } = event.payload;
+				addToast(t('plugin.hook_failed', { id: pluginId, msg: message }), 'error');
+				refreshPlugins();
+			}
+		).then((fn) => {
+			unlistenStatus = fn;
+		});
+
+		return () => {
+			unlistenNotify?.();
+			unlistenStatus?.();
+		};
+	});
+</script>
+
+<div class="plugin-panel">
+	<div class="tab-bar">
+		<div class="seg">
+			<button
+				type="button"
+				class="tab-btn"
+				class:active={activeTab === 'installed'}
+				onclick={() => (activeTab = 'installed')}
+			>
+				{t('plugin.tab_installed')}
+			</button>
+			<button
+				type="button"
+				class="tab-btn"
+				class:active={activeTab === 'marketplace'}
+				onclick={() => (activeTab = 'marketplace')}
+			>
+				{t('plugin.tab_marketplace')}
+				<span class="new-badge">{t('common.new')}</span>
+			</button>
+		</div>
+		<!-- Reload sits with the tabs: a second PLUGINS heading under the panel's
+		     own was there only to hold it. -->
+		{#if activeTab === 'installed'}
+			<button
+				class="toolbar-btn"
+				onclick={discoverPlugins}
+				disabled={discovering}
+				title={t('plugin.reload')}
+				aria-label={t('plugin.reload')}
+			>
+				<svg class:spinning={discovering} width="14" height="14" viewBox="0 0 24 24" fill="none">
+					<path
+						d="M23 4v6h-6M1 20v-6h6"
+						stroke="currentColor"
+						stroke-width="1.5"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					/>
+					<path
+						d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"
+						stroke="currentColor"
+						stroke-width="1.5"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+					/>
+				</svg>
+			</button>
+		{/if}
+	</div>
+
+	{#if activeTab === 'installed'}
+
+		{#if loading}
+			<div class="loading-indicator">
+				<span class="loading-text">{t('plugin.loading')}</span>
+			</div>
+		{/if}
+
+		{#if plugins.length === 0 && !loading}
+			<div class="empty-state">
+				<p class="empty-text">{t('plugin.no_plugins')}</p>
+				<p class="empty-hint">{t('plugin.no_plugins_hint')}</p>
+			</div>
+		{:else}
+			<div class="plugin-list">
+				{#each plugins as plugin (plugin.manifest.id)}
+					<PluginListItem
+						{plugin}
+						active={activePluginId === plugin.manifest.id}
+						onclick={() => handlePluginClick(plugin.manifest.id)}
+						onToggle={(enabled) => handleToggle(plugin.manifest.id, enabled)}
+					/>
+				{/each}
+			</div>
+		{/if}
+
+		{#if selectedPlugin?.hasUi && activePluginId}
+			<div class="divider"></div>
+			<div class="plugin-view-container">
+				<PluginView pluginId={activePluginId} {connectionId} />
+			</div>
+		{/if}
+	{:else}
+		<MarketplacePanel />
+	{/if}
+</div>
+
+<style>
+	.plugin-panel {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		overflow: hidden;
+	}
+
+	/* A short window (a phone on its side): the panel scrolls as one rather
+	   than cutting off what does not fit. */
+	@media (max-height: 480px) {
+		.plugin-panel {
+			overflow-y: auto;
+		}
+	}
+
+	/* Recipes' and the session editor's segmented control: a recessed track,
+	   the open view raised out of it. */
+	.tab-bar {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		padding: var(--space-2);
+	}
+
+	.seg {
+		display: flex;
+		flex: 1;
+		gap: 2px;
+		min-width: 0;
+		padding: 2px;
+		background: var(--color-bg-primary);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-btn);
+	}
+
+	.tab-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		/* Shares the panel's width, wrapping the badge under the label rather
+		   than running off a narrow screen. */
+		flex-wrap: wrap;
+		gap: 2px 5px;
+		flex: 1;
+		min-width: 0;
+		padding: 4px 8px;
+		font-family: var(--font-sans);
+		font-size: var(--text-xs);
+		font-weight: 500;
+		color: var(--color-text-secondary);
+		background: transparent;
+		border: none;
+		border-radius: var(--radius-sm);
+		cursor: pointer;
+		transition:
+			background-color var(--duration-default) var(--ease-default),
+			color var(--duration-default) var(--ease-default);
+	}
+
+	.new-badge {
+		padding: 1px 4px;
+		font-size: 0.5rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: #fff;
+		background-color: var(--color-accent);
+		border-radius: 3px;
+	}
+
+	.tab-btn:hover:not(.active) {
+		color: var(--color-text-primary);
+	}
+
+	.tab-btn.active {
+		color: var(--color-accent);
+		background: var(--color-bg-elevated);
+		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), inset 0 0 0 1px var(--color-border);
+	}
+
+	.toolbar-btn {
+		flex-shrink: 0;
+		align-self: center;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 24px;
+		height: 24px;
+		padding: 0;
+		border: none;
+		border-radius: 4px;
+		background: transparent;
+		color: var(--color-text-secondary);
+		cursor: pointer;
+		transition: all var(--duration-default) var(--ease-default);
+	}
+
+	.toolbar-btn:hover:not(:disabled) {
+		background-color: var(--color-surface-active);
+		color: var(--color-text-primary);
+	}
+
+	.toolbar-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	@keyframes spin {
+		from {
+			transform: rotate(0deg);
+		}
+		to {
+			transform: rotate(360deg);
+		}
+	}
+
+	.spinning {
+		animation: spin 0.8s linear infinite;
+	}
+
+	.loading-indicator {
+		padding: 6px 10px;
+	}
+
+	.loading-text {
+		font-size: 0.6875rem;
+		color: var(--color-text-secondary);
+		opacity: 0.7;
+	}
+
+	.empty-state {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		padding: 32px 16px;
+		text-align: center;
+	}
+
+	.empty-text {
+		margin: 0 0 4px;
+		font-size: 0.8125rem;
+		color: var(--color-text-secondary);
+	}
+
+	.empty-hint {
+		margin: 0;
+		font-size: 0.6875rem;
+		color: var(--color-text-secondary);
+		opacity: 0.7;
+		line-height: 1.5;
+	}
+
+	.plugin-list {
+		flex: 1;
+		overflow-y: auto;
+		padding: 4px 8px;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.divider {
+		height: 1px;
+		background-color: var(--color-border);
+		margin: 0 10px;
+		flex-shrink: 0;
+	}
+
+	.plugin-view-container {
+		flex: 1;
+		min-height: 0;
+		overflow: hidden;
+	}
+</style>

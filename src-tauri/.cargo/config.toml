@@ -1,0 +1,8 @@
+# Windows builds carry the C and C++ runtimes inside reach.exe. Linked
+# dynamically, the C++ part (MSVCP140.dll, pulled in by openh264's C++) is
+# not in Windows: on a machine without the Visual C++ Redistributable, such
+# as winget's clean test sandbox, reach.exe would not start at all
+# (STATUS_DLL_NOT_FOUND, exit code -1073741515). Rust and every C/C++
+# dependency built through cc follow this flag.
+[target.'cfg(all(target_os = "windows", target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

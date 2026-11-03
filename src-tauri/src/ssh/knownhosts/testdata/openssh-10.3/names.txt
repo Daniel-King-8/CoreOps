@@ -1,0 +1,1 @@
+example.com 192.0.2.1 [example.com]:2222 a.wild.test bad.wild.test x.ca.test anything.test indented.test upper.test UPPER.Test qa.test qab.test nospace.test tab.test dup.test alias.test crlf.test neg.test trunc.test mismatch.test small.test sk.test two.test host.test

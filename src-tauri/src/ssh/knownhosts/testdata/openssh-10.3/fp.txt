@@ -1,0 +1,286 @@
+== k_ed1.pub sha256
+256 SHA256:NBqJO3ad9bU5KIVqbUHHsOGm2+DqDDiIqxFJOrgWZRk k_ed1 (ED25519)
++--[ED25519 256]--+
+|   E      +o.    |
+|    o. . o =.    |
+| . +. o o B . .  |
+|+.o  . = O + o o |
+|*.  + o S + o +  |
+|.=.o o o = .   . |
+|=.o .   o .      |
+|.o . o .         |
+|+    .+          |
++----[SHA256]-----+
+== k_ed1.pub md5
+256 MD5:c6:cf:17:6c:bd:48:04:a3:f8:6a:8e:5c:ee:d9:43:93 k_ed1 (ED25519)
++--[ED25519 256]--+
+|          o      |
+|       . . o     |
+|      . .   .    |
+|       o   o .   |
+|        S.  = .  |
+|       oEo o o . |
+|      +. .o o .  |
+|   . * o.  .     |
+|    o.= ..       |
++------[MD5]------+
+== k_ed2.pub sha256
+256 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs k_ed2 (ED25519)
++--[ED25519 256]--+
+|  o+*.           |
+| o.+.+           |
+| .o.= o .     . .|
+| ..* . B     . oo|
+|. . = = S . .  .o|
+| . o + + + ......|
+|  o . . o ..o+ oo|
+|   .   .   oo +o.|
+|  E        .o...o|
++----[SHA256]-----+
+== k_ed2.pub md5
+256 MD5:d9:98:56:f2:60:8f:a4:94:b0:39:26:de:c8:18:2f:6f k_ed2 (ED25519)
++--[ED25519 256]--+
+|    .            |
+|     + .         |
+|. . = o = .      |
+| * = o + %       |
+|o = . . S +      |
+| o     .         |
+|  E              |
+| .               |
+|                 |
++------[MD5]------+
+== k_ec256.pub sha256
+256 SHA256:wvOF0JpAoHa7Qw296gE5do1I8XJsRrxv8k0ET1NyMSU k_ec256 (ECDSA)
++---[ECDSA 256]---+
+| .oo.  ..Eo.     |
+| .=o.. +o o      |
+|.+ Oo.= o        |
+|o O.*o.* .       |
+| * =.+B S .      |
+|. =.oo = .       |
+|   =+ o .        |
+|  . o. .         |
+|   .             |
++----[SHA256]-----+
+== k_ec256.pub md5
+256 MD5:2f:ba:2c:96:fb:68:42:bf:6d:e7:e0:53:6b:64:fc:b8 k_ec256 (ECDSA)
++---[ECDSA 256]---+
+|                 |
+|                 |
+|                 |
+|                 |
+|       .S        |
+|  .     =.       |
+| . . ..+.+.      |
+|  . *=oo=..      |
+|   ++*B*E.       |
++------[MD5]------+
+== k_ec384.pub sha256
+384 SHA256:ehP2PZCI3G63RuOpgnICbRbTk9DErHqHLGc3veXEpQ0 k_ec384 (ECDSA)
++---[ECDSA 384]---+
+|   =.            |
+|  . +            |
+|   + .           |
+|  + +. oE...     |
+| + + oo.S=o      |
+|+ X + .+=o+o     |
+| O o o.==oooo    |
+|  o o oo.o+. .   |
+|   +   ..o.      |
++----[SHA256]-----+
+== k_ec384.pub md5
+384 MD5:e9:68:25:74:e6:90:4a:91:b9:dd:7c:fe:22:dd:2a:b4 k_ec384 (ECDSA)
++---[ECDSA 384]---+
+|    .o           |
+|    o. .         |
+|    .o+oo        |
+|   ..o.=o..      |
+|    . . So       |
+|       =. .      |
+|      o..o o     |
+|     .  E o o    |
+|         o.o     |
++------[MD5]------+
+== k_ec521.pub sha256
+521 SHA256:2OuePHYdAqFtCyVYO+rFhy37SGD/LGpy7ihAksMPWzk k_ec521 (ECDSA)
++---[ECDSA 521]---+
+|     o.          |
+|    . ..o        |
+|..  . o= .       |
+|++ E oo*+        |
+|o.= = *oSo       |
+|.. + + +... .    |
+|.   . + .  o .   |
+|. ..o..Bo.. .    |
+| ..*+..+Oo       |
++----[SHA256]-----+
+== k_ec521.pub md5
+521 MD5:16:d7:b1:76:02:0d:91:bd:f4:8a:10:a1:24:a8:58:da k_ec521 (ECDSA)
++---[ECDSA 521]---+
+|   .. . ..+*.    |
+|  o  o .. .o+o   |
+|.=    . ....=o.  |
+|+ E     .o ..o.  |
+|        S. . .   |
+|       .  . .    |
+|                 |
+|                 |
+|                 |
++------[MD5]------+
+== k_rsa.pub sha256
+2048 SHA256:HQMJb8E5kL56CbHkt4TzOPHxZ5zkEkepZ518IgRTDsg k_rsa (RSA)
++---[RSA 2048]----+
+|     .o*++.      |
+|      E.B=       |
+|     .  o++.     |
+|    o .. .+o     |
+|   o + .S+.o .   |
+|    B = o * = .  |
+|     @ = O o o   |
+|    + * o *      |
+|     o   +       |
++----[SHA256]-----+
+== k_rsa.pub md5
+2048 MD5:5f:a4:7c:9f:54:4c:45:2e:cc:58:17:4c:a2:dd:06:6a k_rsa (RSA)
++---[RSA 2048]----+
+|             o++B|
+|            +=+* |
+|           Eo.+o+|
+|         ..o  .o |
+|        S o o .  |
+|         . o o . |
+|          .   o  |
+|                 |
+|                 |
++------[MD5]------+
+== k_rsa1024.pub sha256
+1024 SHA256:qqbvv/ZO/nDdU5/W1XtmkgSzfK3FlC+mcbbIL+Eqqps k_rsa1024 (RSA)
++---[RSA 1024]----+
+|                 |
+|                .|
+|            o  ..|
+|           . + +o|
+|        S   + B O|
+|       .   o.@ B*|
+|      . o ..=.B+*|
+|    .o.o.o  o..=.|
+|  .=E=+=+oo. ..  |
++----[SHA256]-----+
+== k_rsa1024.pub md5
+1024 MD5:a3:a6:f3:99:ad:e9:f9:eb:c8:af:64:d8:d4:20:20:b4 k_rsa1024 (RSA)
++---[RSA 1024]----+
+|o..              |
+| ...             |
+| E  . .          |
+|     . o         |
+|      . S        |
+|     + . .       |
+|    . *          |
+|    .* B         |
+|    .+%**.       |
++------[MD5]------+
+== k_sk.pub sha256
+256 SHA256:DFjugw6BlmQNQDa0CqsfD+tcuvhVnzlnqCi0CdVZyMk k_sk (ED25519-SK)
++[ED25519-SK 256]-+
+|=Ooo o.          |
+|+.+.E+.          |
+|o+...oo          |
+|+...oo o         |
+|o.. . + S        |
+|o .o . o +       |
+|.ooo+   * o      |
+| ++O . . +       |
+|.oOoo .          |
++----[SHA256]-----+
+== k_sk.pub md5
+256 MD5:c9:7c:8e:da:b1:65:31:c2:3a:a9:ea:b6:3e:ac:21:7c k_sk (ED25519-SK)
++[ED25519-SK 256]-+
+|                 |
+|                 |
+|                 |
+|       + .       |
+|        S +      |
+|.      o = o     |
+|oo E  + o +      |
+|..=  . + =       |
+|.==+. . o        |
++------[MD5]------+
+== ca.pub sha256
+256 SHA256:sN8omCr+pNjMleaIOe+F5VO1PVjA58v79iIOlV6EypQ ca (ED25519)
++--[ED25519 256]--+
+|       ..        |
+|        .o..     |
+|      . Eoo .    |
+|       * *.o     |
+|    . o S.=..    |
+|   + = . =oo     |
+|  ..X . + o.     |
+|+*oB . . .o o    |
+|=BX..    ..+.o.  |
++----[SHA256]-----+
+== ca.pub md5
+256 MD5:3b:d4:7b:12:29:cc:9e:d3:dd:06:52:e3:db:83:5e:0a ca (ED25519)
++--[ED25519 256]--+
+|                 |
+|                 |
+|            o    |
+|       o . + .   |
+|        S = o    |
+|       o = = *   |
+|        * E = *  |
+|         o = + . |
+|            o    |
++------[MD5]------+
+== ca2.pub sha256
+256 SHA256:xqgPHxL20Gro4SgmX+TNIQC0HOmY650OZ2OP5z2wQDA ca2 (ECDSA)
++---[ECDSA 256]---+
+|oo.              |
+|.Eo              |
+|o++              |
+|o. o . o         |
+| .. * + S        |
+|.  * @ o         |
+|..+=@ B          |
+|o*=*+B.o         |
+|=.=oooo..        |
++----[SHA256]-----+
+== ca2.pub md5
+256 MD5:40:2a:a4:02:85:92:95:f5:ae:0f:0c:2d:02:ee:dc:03 ca2 (ECDSA)
++---[ECDSA 256]---+
+|.=+o. .          |
+|=o.  +           |
+|= . . o          |
+|+  o . .         |
+|.Eo . . S        |
+|o.o+ .           |
+| o o+            |
+|    .o           |
+|      .          |
++------[MD5]------+
+== c_s5-cert.pub sha256
+256 SHA256:1bhfErMqFxmlJ7ny9kP7Ea0/+MndXY99LU7kwlF3XoM c_s5 (ED25519-CERT)
++-[ED25519-CERT]--+
+|            .    |
+|           *  .  |
+|          B =E..+|
+|         . B = ++|
+|        S = + + o|
+|         o =.* o |
+|        . =.+.* o|
+|         + .o+o*X|
+|            .+==X|
++----[SHA256]-----+
+== c_s5-cert.pub md5
+256 MD5:c1:94:8d:d8:41:62:26:cb:2f:2c:93:62:b1:28:ba:f0 c_s5 (ED25519-CERT)
++-[ED25519-CERT]--+
+|    . +++=       |
+|   . =.++ .      |
+| .  o   o        |
+|. oo .   .       |
+|+o+ o . S        |
+|+. o .           |
+|o                |
+|.o               |
+|. E              |
++------[MD5]------+

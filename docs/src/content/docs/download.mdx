@@ -1,0 +1,88 @@
+---
+title: Download Reach
+description: "Download Reach, the free SSH client, for Windows, macOS, Linux or Android, plus apt and dnf repositories and what installing it changes."
+tableOfContents: false
+---
+
+import Downloads from '../../components/Downloads.astro';
+import InstallFacts from '../../components/InstallFacts.astro';
+
+Pick your platform. These point at the current release and update themselves,
+so this page never goes stale between releases.
+
+<Downloads />
+
+<InstallFacts />
+
+## After downloading
+
+**Windows.** The installer is not signed with a paid certificate, so
+SmartScreen will warn you. Choose *More info*, then *Run anyway*.
+
+**macOS.** The app is ad-hoc signed rather than notarised, so Gatekeeper
+blocks it on first launch. Right-click the app and choose *Open*, or clear
+the quarantine flag:
+
+```sh
+xattr -cr /Applications/Reach.app
+```
+
+**Linux.** The AppImage needs to be marked executable before it will run:
+
+```sh
+chmod +x Reach_*_amd64.AppImage
+./Reach_*_amd64.AppImage
+```
+
+The `.deb` and `.rpm` packages are linked under the cards if you would rather
+install through your package manager.
+
+### Install with apt or dnf
+
+Add Reach's signed repository once, and your system's own updates keep Reach
+up to date from then on.
+
+**Ubuntu, Debian and their derivatives:**
+
+```sh
+sudo apt install -y curl gpg
+curl -fsSL https://github.com/alexandrosnt/Reach/releases/latest/download/reach-packages.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/reach.gpg
+echo "deb [signed-by=/usr/share/keyrings/reach.gpg] https://github.com/alexandrosnt/Reach/releases/latest/download ./" \
+  | sudo tee /etc/apt/sources.list.d/reach.list
+sudo apt update && sudo apt install reach
+```
+
+**Fedora, RHEL and their derivatives:**
+
+```sh
+sudo tee /etc/yum.repos.d/reach.repo <<'EOF'
+[reach]
+name=Reach
+baseurl=https://reachssh.com/rpm
+enabled=1
+repo_gpgcheck=1
+gpgcheck=0
+gpgkey=https://reachssh.com/reach-packages.asc
+EOF
+sudo dnf install reach
+```
+
+The key is trusted for Reach's repository only (`signed-by`), not for the rest
+of your system. Every index is signed with it, and each package is checked
+against the checksum the signed index lists; a changed index is refused.
+
+**Android.** The APK is installed outside the Play Store, so Android will ask
+you to allow installs from this source. The download is for 64-bit phones,
+which is nearly all of them; older 32-bit phones take the `armv7` APK under
+*Other formats*. Coming from 0.6.8 or earlier, uninstall the old Reach once
+first: those releases were signed with a different key, and Android will not
+install over them.
+
+To get new releases on Android without coming back here, [add Reach to Obtainium](https://apps.obtainium.imranr.dev/redirect.html?r=obtainium://add/https://github.com/alexandrosnt/Reach):
+it installs updates straight from Reach's GitHub releases.
+
+## Updating
+
+Reach checks for new releases on its own and offers them in place, so this
+page is only needed for a first install or a fresh machine.

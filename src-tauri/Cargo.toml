@@ -1,0 +1,369 @@
+[package]
+name = "coreops"
+version = "0.8.0"
+description = "CoreOps - Cross-platform SSH & Remote Management Tool"
+authors = ["CoreOps Contributors"]
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "coreops_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+# Opening links in the browser. The shell plugin's open is denied on Android
+# ("Scoped shell IO error"); the opener uses the system's own view action.
+tauri-plugin-opener = "2"
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-log = "0.2"
+log = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+# SSH
+# ring, the crypto the rest of the app installs for rustls (see run() in
+# lib.rs). rsa keeps RSA keys working.
+russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "des", "flate2"] }
+# Used to read what a key says
+# about itself (algorithm, fingerprint, whether it is encrypted) without
+# needing the passphrase.
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "encryption"] }
+# PKCS11Provider (src/ssh/pkcs11.rs): the token's library, loaded at run time.
+# cryptoki-sys for the one call cryptoki does not offer on its own (C_Sign
+# after C_SignInit); both are already in the tree through sspi.
+cryptoki = "0.12"
+cryptoki-sys = "0.5"
+# SecurityKeyProvider middleware (src/ssh/sk.rs), loaded at run time as
+# OpenSSH dlopens it.
+libloading = "0.8"
+
+# Encryption
+# zeroize: wipe the hashing blocks and the keys ciphers hold when they drop.
+argon2 = { version = "0.6", features = ["zeroize"] }
+rand = "0.10"
+hickory-resolver = { version = "0.26", features = ["dnssec-ring"] }
+# Locking key material into RAM (VirtualLock / mlock); see src/vault/shield.rs.
+memsec = { version = "0.7", default-features = false, features = ["use_os"] }
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.23"
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
+hkdf = "0.13"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+secrecy = { version = "0.10", features = ["serde"] }
+
+# Vault storage
+# Local files, and the remote connection to Turso. libsql's own TLS (hyper-
+# rustls 0.25, with rustls-webpki 0.102 and its advisories) is left out;
+# src/vault/turso_tls.rs connects instead, over the four crates below.
+libsql = { version = "0.9", default-features = false, features = ["core", "remote"] }
+hyper-014 = { package = "hyper", version = "0.14", features = ["client", "http1", "tcp"] }
+tower-04 = { package = "tower", version = "0.4" }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+dirs = "7"
+sha2 = "0.11"
+# ssh_config as OpenSSH reads it: %C is a SHA-1, Include takes globs, Match
+# looks at the local host, user and networks.
+sha1 = "0.11"
+glob = "0.3"
+gethostname = "1"
+whoami = "2"
+if-addrs = "0.15"
+# The socket options ssh_config sets (IPQoS, TCPKeepAlive, binding).
+socket2 = { version = "0.6", features = ["all"] }
+# Keychain/credential storage
+# NOTE: Not available on Android - needs tauri-plugin-biometric for Android Keystore
+# The OS credential store holds the key for auto-unlock. keyring-core plus one
+# store per platform (see keychain_entry in src/vault/manager.rs).
+keyring-core = "1"
+
+# Databases workspace. sqlx for PostgreSQL and MySQL/MariaDB, tiberius for SQL
+# Server; SQLite files go through libsql above, because a second bundled SQLite
+# (sqlx's) collides with libsql's at link time (tursodatabase/libsql#541).
+# Pure-Rust TLS on both, with webpki roots, so Android needs no system store.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "mysql"] }
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls", "chrono"] }
+# SQL Server sends dates as day counts; chrono turns them into readable text.
+# `clock` gives local time for session log names and headers.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# Session logs: the DEC VT parser Alacritty uses, to keep only printable text
+# in "Printable output" mode, as PuTTY does.
+vte = "0.15"
+# Comparing release versions for the Android update notice (already in the
+# tree through Tauri).
+semver = "1"
+# Redis: keys, not tables, so it has its own module rather than going through sqlx.
+redis = { version = "1.7", default-features = false, features = ["aio", "tokio-comp", "tokio-rustls-comp", "tls-rustls-webpki-roots", "streams"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+futures-util = "0.3"
+
+# Toolchain detection & installation
+which = "8"
+
+# HTTP (AI API proxy)
+# rustls without a provider of its own: Redis and the WebSocket client already
+# build both ring and aws-lc-rs into rustls, so none is chosen by default and
+# run() in lib.rs installs ring for the whole process. See src/http.rs for
+# Android's root certificates.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
+# The process-wide crypto provider reqwest asks for; installed in run().
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# SOCKS5/SOCKS4 proxy (Tor, etc.)
+tokio-socks = "0.5"
+
+# MCP server. Axum rather than the official Rust MCP SDK: MCP is JSON-RPC 2.0
+# over HTTP plus SSE — a small, stable spec — and this crate already pins deps
+# deliberately for supply-chain reasons. Owning ~300 lines of protocol beats
+# tracking a fast-moving SDK through breaking releases.
+#
+# Axum 0.6 is already in the tree transitively via Tauri; declared explicitly at
+# 0.8 so the server does not silently change behaviour when Tauri bumps its own.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tower-http = { version = "0.7", default-features = false, features = ["cors"] }
+
+# Regex (dependency graph)
+regex = "1"
+
+# Lua plugin engine
+mlua = { version = "0.12", features = ["luau", "vendored", "async", "serialize", "send"] }
+toml = "1"
+# Plugin marketplace: download + extract release zips. Pinned >= 2.3 to avoid
+# CVE-2025-29787 (symlink-based path traversal) which affects 1.3.0–2.2.x.
+# Deflate only: every zip Reach opens (plugins, VcXsrv, OpenTofu) uses it,
+# and the other methods pulled in zstd and its advisories.
+zip = { version = "9", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
+tauri-plugin-process = "2.3.1"
+# The Android half of vault unlock (fingerprint, security keys); a no-op elsewhere.
+tauri-plugin-reach-unlock = { path = "plugins/reach-unlock" }
+# VNC (RFB) client for VNC sessions.
+vnc-rs = "0.6"
+# Tight-encoded VNC rectangles are JPEG. Already in the tree through `image`.
+zune-jpeg = "0.5"
+
+# Remote desktop. IronRDP is pure Rust end to end — the connector, CredSSP,
+# TLS via rustls, the codecs — so it builds on all four targets, Android
+# included, with no C toolchain in the loop. `default-features = false` keeps
+# sound and drive redirection out: each pulls a native backend and neither is
+# needed to see a desktop and drive it. The clipboard is in, with a backend of
+# our own (src/rdp/clipboard.rs) rather than IronRDP's Windows-only one.
+#
+# Pinned to a commit rather than taken from crates.io. The published
+# ironrdp-client 0.1.0 delivers only whole framebuffers; the repository since
+# then delivers tightly packed changed regions (`DesktopUpdate`), which is the
+# difference between a cursor blink costing a few hundred bytes and costing
+# eight megabytes. All three crates come from the same revision so their types
+# agree. Move back to versions when the next release carries this.
+ironrdp-client = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59", default-features = false, features = ["rustls", "clipboard", "rdpdr"] }
+ironrdp-cliprdr = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59" }
+ironrdp-rdpdr = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59" }
+ironrdp-svc = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59" }
+ironrdp-tls = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59", default-features = false, features = ["rustls"] }
+# H.264 for the graphics pipeline: OpenH264 compiled in (the user's call; see the changelog).
+ironrdp-egfx = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59", features = ["openh264-bundled"] }
+ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59" }
+ironrdp-graphics = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59" }
+smallvec = "1"
+# Docker and Podman: the Engine API client. Remote engines go over an SSH
+# channel of Reach's own (src/container/transport.rs); `pipe` is the local
+# socket or Windows named pipe, for an engine on this computer.
+bollard = { version = "0.21", default-features = false, features = ["pipe"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+http = "1"
+# Kubernetes: the standard Rust client, rustls only (no OpenSSL), with `ws` for
+# exec, attach and port-forward. k8s-openapi needs one API version: the lowest
+# it offers, so the types fit the widest range of clusters.
+kube = { version = "4.2", default-features = false, features = ["client", "rustls-tls", "ring", "ws"] }
+k8s-openapi = { version = "0.28", features = ["v1_32"] }
+# YAML for viewing and editing resources: the same parser kube itself uses.
+serde-saphyr = { version = "0.0.29", features = ["serialize"] }
+
+# PTY, Serial, Autostart, Updater, native drag-out (desktop only)
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# The local clipboard for RDP: text and file lists. Android has no file clipboard and uses the plugin.
+arboard = { version = "3.6", default-features = false }
+# Sound for RDP. The same crate again with one more feature: Cargo unions the
+# features, so playback (cpal + a bundled Opus) is built for the desktops only.
+# Android would need the NDK C++ toolchain for cpal and has no listener yet.
+ironrdp-client = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59", default-features = false, features = ["sound"] }
+portable-pty = "0.9"
+serialport = "4"
+tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-single-instance = "2"
+# Dragging a file out of the window to the desktop. Tauri has no API for this
+# and there is no other maintained option; see src/lib/explorer/drag-out.ts
+# for what it can and cannot do.
+tauri-plugin-drag = "2"
+
+# libgit2-sys links OpenSSL on Linux. It reaches us through ssh2-config's
+# build-dependency on git2, so the feature has to be unified in *both* the
+# normal and build-dependency graphs — hence the two entries. `vendored` builds
+# OpenSSL from source because the CI image installs no libssl-dev.
+#
+# Scoped to Linux deliberately. Windows does not need OpenSSL at all here, and
+# declaring it unconditionally broke every Windows build: the vendored build
+# shells out to perl, and Git Bash's MSYS perl lacks Locale::Maketext::Simple,
+# so `cargo build` failed before compiling a single line of this crate.
+# macOS uses SecureTransport rather than OpenSSL.
+#
+# `target_os = "linux"`, NOT `all(unix, not(target_os = "macos"))`. Android is
+# also unix and also not macOS, so that expression caught it and forced the
+# vendored build on the NDK, where it cannot work: openssl-src calls the
+# prefixed binutils, and NDK r23+ ships only `llvm-ranlib`, so every Android
+# release build died with
+#     /bin/sh: 1: aarch64-linux-android-ranlib: not found
+#     make: *** [Makefile:2807: install_dev] Error 127
+# Android's target_os is "android", so naming Linux explicitly excludes it.
+# Dragging a remote file out without downloading it first. Explorer pulls the
+# bytes through an IStream on drop, so nothing is fetched while dragging.
+# FIDO2 security keys over USB for vault unlock; Windows goes through
+# webauthn.dll instead, which needs no admin rights.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+ctap-hid-fido2 = "3.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1"
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Security_Credentials",
+    "Security_Cryptography",
+    "Win32_Networking_WindowsWebServices",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Credentials",
+    "Win32_Networking_WinSock",
+    "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Power",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Media_Audio",
+    "Win32_Storage_FileSystem",
+] }
+# The #[implement] macro expands to paths rooted at this crate, so it has to
+# be a direct dependency even though everything else comes through `windows`.
+windows-core = "0.62"
+# Reaching the WebView2 controller to tell it focus moved (issue #49).
+webview2-com = "0.39"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The kernel keyring is emptied by every reboot (issue #87): the vault key goes
+# to the desktop's keychain (GNOME Keyring, KWallet) through the Secret
+# Service, with the kernel keyring as the fallback where there is none.
+linux-keyutils-keyring-store = "1"
+zbus-secret-service-keyring-store = { version = "1", features = ["rt-tokio-crypto-rust"] }
+# The notification sound, played without WebKitGTK's GStreamer, whose missing
+# audio output crashed the page (src/sound.rs, issue #87). The version RDP's
+# sound already builds.
+cpal = "0.17"
+# Following the screen lock and sleep over D-Bus (src/system_lock.rs); the
+# version already in the tree.
+zbus = { version = "5", features = ["blocking-api"] }
+openssl-sys = { version = "0.9", features = ["vendored"] }
+
+# macOS only, and only to turn one user default off at launch: holding a key in
+# a WKWebView opens the accent picker instead of repeating the key, so a held
+# arrow or backspace does nothing at all in the terminal. Setting it needs an
+# Objective-C message, and `Info.plist` is not an answer — it is not a
+# NSUserDefaults domain, so a key placed there is simply never read. See
+# `disable_press_and_hold` in lib.rs. objc2 is already in the tree under
+# tao/wry, so naming it here downloads nothing new.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+objc2 = "0.6"
+# Following the screen lock and sleep (src/system_lock.rs); the versions Tauri
+# already builds.
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSDistributedNotificationCenter", "NSNotification", "NSString", "NSOperation", "block2"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "block2"] }
+# Touch ID for vault unlock (Settings > Security).
+objc2-local-authentication = { version = "0.3", features = ["LAContext", "LAError", "block2"] }
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+openssl-sys = { version = "0.9", features = ["vendored"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+# The app itself stays a debug build for fast incremental compiles, but its
+# dependencies are optimised even in dev: RDP bitmap decoding, TLS and the
+# image codecs run tens of times slower unoptimised, which made a remote
+# desktop in `tauri dev` lag in ways a release build never would.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Release builds ship without symbol tables. Nothing reads them on a user's
+# machine, and on Android the library is copied once per processor type into
+# the APK, so every megabyte of symbols was paid for on every download.
+[profile.release]
+strip = true
+
+# The client crate with one addition of ours, `with_h264_decoder`; see vendor/ironrdp-client/Cargo.toml.
+[patch."https://github.com/Devolutions/IronRDP"]
+ironrdp-client = { path = "vendor/ironrdp-client" }
+# sspi 0.22 and picky rc.26, so russh can take the RustCrypto releases it
+# needs; see the header of vendor/ironrdp-connector/Cargo.toml.
+ironrdp-connector = { path = "vendor/ironrdp-connector" }
+
+# Free space of the volume a shared RDP folder is on.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The system's GSSAPI library for Kerberos logins, loaded when first used
+# (see src/ssh/gssapi.rs), so Reach starts without one.
+[target.'cfg(all(unix, not(target_os = "android")))'.dependencies]
+libloading = "0.8"
+
+# Root certificates for HTTPS on Android; see src/http.rs.
+[target.'cfg(target_os = "android")'.dependencies]
+webpki-root-certs = "1"
+# A cluster whose kubeconfig names no CA is checked against the bundled
+# Mozilla roots here, as Reach's HTTP client is: the OS verifier needs a Java
+# component Reach does not ship. With a CA (the usual case) only that CA counts.
+kube = { version = "4.2", default-features = false, features = ["webpki-roots"] }
+
+# libsql with its double close of a local connection fixed; see the header of
+# vendor/libsql/Cargo.toml.
+[patch.crates-io]
+libsql = { path = "vendor/libsql" }
+# russh with the older MACs and sntrup761x25519-sha512 an ssh_config may ask
+# for, none of them offered by default; see the header of vendor/russh/Cargo.toml.
+russh = { path = "vendor/russh" }
+
+[dev-dependencies]
+# Tests keep keychain entries in memory, never in the OS keychain.
+keyring-core = { version = "1", features = ["sample"] }

@@ -1,0 +1,379 @@
+<script lang="ts">
+	import Button from '#lib/components/shared/Button.svelte';
+	import Input from '#lib/components/shared/Input.svelte';
+	import { exportBackup, previewBackup, importBackup } from '#lib/state/vault.svelte.js';
+	import { addToast } from '#lib/state/toasts.svelte.js';
+	import { getSettings, syncTraySettings } from '#lib/state/settings.svelte.js';
+	import * as vaultIpc from '#lib/ipc/vault.js';
+	import { save, open, message } from '@tauri-apps/plugin-dialog';
+	import { relaunch } from '@tauri-apps/plugin-process';
+	import type { BackupPreview } from '#lib/ipc/vault.js';
+	import { t } from '#lib/state/i18n.svelte.js';
+
+	// Export state
+	let exportPassword = $state('');
+	let exportConfirmPassword = $state('');
+	let exporting = $state(false);
+	let exportError = $state('');
+
+	// Import state
+	let importFilePath = $state('');
+	let importExportPassword = $state('');
+	let importMasterPassword = $state('');
+	let importing = $state(false);
+	let importError = $state('');
+	let preview: BackupPreview | null = $state(null);
+	let verifying = $state(false);
+
+	let canExport = $derived(
+		exportPassword.length >= 8 &&
+		exportPassword === exportConfirmPassword &&
+		!exporting
+	);
+
+	let canVerify = $derived(
+		importFilePath.length > 0 &&
+		importExportPassword.length >= 8 &&
+		!verifying
+	);
+
+	let canImport = $derived(
+		preview !== null &&
+		!importing
+	);
+
+	function formatDate(timestamp: number): string {
+		return new Date(timestamp * 1000).toLocaleString();
+	}
+
+	async function handleExport() {
+		exportError = '';
+
+		if (exportPassword.length < 8) {
+			exportError = t('backup.password_too_short');
+			return;
+		}
+
+		if (exportPassword !== exportConfirmPassword) {
+			exportError = t('backup.passwords_mismatch');
+			return;
+		}
+
+		exporting = true;
+
+		try {
+			// Save local settings into vault AppSettings so they're included in backup
+			const localSettings = getSettings();
+			const currentAppSettings = await vaultIpc.getSettings();
+			await vaultIpc.saveSettings({
+				...currentAppSettings,
+				minimizeToTray: localSettings.minimizeToTray,
+				startWithSystem: localSettings.startWithSystem,
+				defaultShell: localSettings.defaultShell,
+				openLastSession: localSettings.openLastSession,
+				fontSize: localSettings.fontSize,
+				fontFamily: localSettings.fontFamily,
+				locale: localSettings.locale
+			});
+
+			const filePath = await save({
+				filters: [{ name: 'CoreOps Backup', extensions: ['reachbackup'] }],
+				defaultPath: 'reach-backup.reachbackup'
+			});
+
+			if (!filePath) {
+				exporting = false;
+				return;
+			}
+
+			await exportBackup(exportPassword, filePath);
+			addToast(t('backup.exported_toast'), 'success');
+			exportPassword = '';
+			exportConfirmPassword = '';
+		} catch (e) {
+			exportError = e instanceof Error ? e.message : String(e);
+			addToast(t('backup.export_failed_toast'), 'error');
+		} finally {
+			exporting = false;
+		}
+	}
+
+	async function handleSelectFile() {
+		importError = '';
+		preview = null;
+
+		try {
+			const selected = await open({
+				filters: [{ name: 'CoreOps Backup', extensions: ['reachbackup'] }],
+				multiple: false
+			});
+
+			if (selected) {
+				importFilePath = selected as string;
+			}
+		} catch (e) {
+			importError = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	async function handleVerify() {
+		importError = '';
+		preview = null;
+		verifying = true;
+
+		try {
+			preview = await previewBackup(importFilePath, importExportPassword);
+			addToast(t('backup.verified_toast'), 'success');
+		} catch (e) {
+			importError = e instanceof Error ? e.message : String(e);
+		} finally {
+			verifying = false;
+		}
+	}
+
+	async function handleImport() {
+		if (!preview) return;
+
+		importError = '';
+		importing = true;
+
+		try {
+			await importBackup(importFilePath, importExportPassword, importMasterPassword);
+			addToast(t('backup.imported_toast'), 'success');
+			await message('Backup restored successfully. The app will now restart to apply all settings.', { title: 'Import Complete', kind: 'info' });
+			await relaunch();
+		} catch (e) {
+			importError = e instanceof Error ? e.message : String(e);
+			addToast(t('backup.import_failed_toast'), 'error');
+		} finally {
+			importing = false;
+		}
+	}
+</script>
+
+<div class="tab-content">
+	<!-- Export Section -->
+	<div class="section">
+		<h3 class="section-title">{t('backup.export')}</h3>
+		<p class="section-desc">
+			{t('backup.export_desc')}
+		</p>
+
+		<div class="form-field">
+			<Input
+				label={t('backup.export_password')}
+				type="password"
+				placeholder={t('vault.min_chars')}
+				bind:value={exportPassword}
+				disabled={exporting}
+			/>
+		</div>
+
+		<div class="form-field">
+			<Input
+				label={t('backup.confirm_password')}
+				type="password"
+				placeholder={t('common.reenter_password')}
+				bind:value={exportConfirmPassword}
+				disabled={exporting}
+			/>
+		</div>
+
+		{#if exportError}
+			<div class="form-error">{exportError}</div>
+		{/if}
+
+		<div class="action-row">
+			<Button variant="primary" size="sm" onclick={handleExport} disabled={!canExport}>
+				{exporting ? t('backup.exporting') : t('backup.export_backup')}
+			</Button>
+		</div>
+	</div>
+
+	<!-- Import Section -->
+	<div class="section">
+		<h3 class="section-title">{t('backup.import')}</h3>
+		<p class="section-desc">
+			{t('backup.import_desc')}
+		</p>
+
+		<div class="action-row">
+			<Button variant="secondary" size="sm" onclick={handleSelectFile}>
+				{t('backup.select_file')}
+			</Button>
+		</div>
+
+		{#if importFilePath}
+			<div class="setting-row">
+				<div class="setting-info">
+					<span class="setting-label">{t('backup.selected_file')}</span>
+					<span class="setting-value mono truncate">{importFilePath}</span>
+				</div>
+			</div>
+
+			<div class="form-field">
+				<Input
+					label={t('backup.export_password')}
+					type="password"
+					placeholder={t('common.export_password_hint')}
+					bind:value={importExportPassword}
+					disabled={verifying || importing}
+				/>
+			</div>
+
+			<div class="action-row">
+				<Button variant="secondary" size="sm" onclick={handleVerify} disabled={!canVerify}>
+					{verifying ? t('vault.verifying') : t('backup.verify')}
+				</Button>
+			</div>
+		{/if}
+
+		{#if preview}
+			<div class="preview-box">
+				<h4 class="preview-title">{t('backup.preview')}</h4>
+
+				<div class="setting-row">
+					<div class="setting-info">
+						<span class="setting-label">{t('backup.preview_date')}</span>
+						<span class="setting-description">{formatDate(preview.exportedAt)}</span>
+					</div>
+				</div>
+
+				<div class="setting-row">
+					<div class="setting-info">
+						<span class="setting-label">{t('backup.preview_vaults')}</span>
+						<span class="setting-description">{preview.vaultCount}</span>
+					</div>
+				</div>
+
+				<div class="setting-row">
+					<div class="setting-info">
+						<span class="setting-label">{t('backup.preview_secrets')}</span>
+						<span class="setting-description">{preview.secretCount}</span>
+					</div>
+				</div>
+
+				<div class="setting-row">
+					<div class="setting-info">
+						<span class="setting-label">{t('backup.preview_sync')}</span>
+						<span class="setting-description">{preview.hasSyncConfig ? t('backup.included') : t('backup.none')}</span>
+					</div>
+					<div class="status-badge" class:enabled={preview.hasSyncConfig}>
+						{preview.hasSyncConfig ? t('common.yes') : t('common.no')}
+					</div>
+				</div>
+			</div>
+
+			<div class="form-field">
+				<Input
+					label={t('backup.master_password_optional')}
+					type="password"
+					placeholder={t('common.tls_init_hint')}
+					bind:value={importMasterPassword}
+					disabled={importing}
+				/>
+			</div>
+
+			<div class="import-warning">
+				{t('backup.import_warning')}
+			</div>
+
+			{#if importError}
+				<div class="form-error">{importError}</div>
+			{/if}
+
+			<div class="action-row">
+				<Button variant="danger" size="sm" onclick={handleImport} disabled={!canImport}>
+					{importing ? t('backup.importing') : t('backup.import_backup')}
+				</Button>
+			</div>
+		{:else if importError}
+			<div class="form-error">{importError}</div>
+		{/if}
+	</div>
+</div>
+
+<style>
+	.tab-content {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+	}
+
+	.section-desc {
+		margin: 0;
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
+	}
+
+	.setting-value {
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
+	}
+
+	.setting-value.mono {
+		font-family: var(--font-mono);
+	}
+
+	.setting-value.truncate {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		max-width: 300px;
+	}
+
+	.status-badge {
+		padding: 4px 10px;
+		font-size: 0.75rem;
+		font-weight: 500;
+		border-radius: 6px;
+		background-color: rgba(255, 69, 58, 0.12);
+		color: var(--color-danger);
+	}
+
+	.status-badge.enabled {
+		background-color: rgba(48, 209, 88, 0.12);
+		color: var(--color-success);
+	}
+
+	.form-field {
+		width: 100%;
+	}
+
+	.form-error {
+		font-size: 0.75rem;
+		color: var(--color-danger);
+		padding: 4px 0;
+	}
+
+	.preview-box {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding: 12px;
+		background: var(--color-bg-secondary);
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+	}
+
+	.preview-title {
+		margin: 0 0 4px 0;
+		font-size: 0.8125rem;
+		font-weight: 600;
+		color: var(--color-text-primary);
+	}
+
+	.preview-box .setting-row:last-child {
+		border-bottom: none;
+	}
+
+	.import-warning {
+		font-size: 0.75rem;
+		font-weight: 500;
+		color: var(--color-warning);
+		padding: 8px 12px;
+		background: rgba(255, 214, 10, 0.08);
+		border: 1px solid rgba(255, 214, 10, 0.3);
+		border-radius: 8px;
+	}
+</style>

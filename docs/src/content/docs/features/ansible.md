@@ -1,0 +1,222 @@
+---
+title: "Ansible Playbooks and Ad-hoc Commands"
+description: "A full Ansible workspace in Reach: projects, playbooks, inventories, roles, collections, ad-hoc commands and vault files. On Windows it runs through WSL."
+---
+
+> Ansible, OpenTofu and Databases are switched on in **Settings → DevOps**. See [DevOps Tools](/settings/devops/).
+
+Reach has a full Ansible workspace built in. You can manage projects, run playbooks, edit inventories, install roles and collections, run ad-hoc commands, and handle vault-encrypted files — all from one place. On Windows, everything routes through WSL automatically.
+
+## Engines
+
+Ansible is a Linux program: its control node needs `fork()`, so Windows cannot run it directly, and that is not something an installer can fix. What Reach does instead is make *where it runs* an explicit choice. The **Engine** control at the top of the workspace lists every place Ansible could run and says, next to each, whether it can right now and why not:
+
+| Engine | Where | Status |
+| --- | --- | --- |
+| **This machine** | A native install on Linux or macOS | Green when `ansible` is on PATH. On Windows it is grey, with the reason. |
+| **WSL** | Your default WSL distribution, on Windows | Green when Ansible is installed inside it. Marked *unofficial*: it works, but the Ansible project does not stand behind WSL as a control node. The project stays on the Windows filesystem and is reached through `/mnt`. |
+| **Container** | An execution environment — `ghcr.io/ansible/community-ansible-dev-tools` — run by podman (preferred) or docker | Green when a runtime is installed and running. The one engine that is identical on Windows, macOS and Linux. The project is bind-mounted, your `~/.ssh` is mounted read-only so keys and `known_hosts` reach the hosts, and the first run pulls the image. |
+| **Remote · user@host** | Any open SSH connection | Checked when you pick it: green when the host has Ansible. |
+
+The first green engine is selected for you. The UI never asks which OS this is — it asks which engines are green.
+
+### Remote runs
+
+A remote engine is the one path that is identical on Windows, macOS and Linux, and it needs one thing from Reach: the project has to get there. Before every remote run Reach packs the project (skipping `.git`, `.venv`, `__pycache__` and the like), streams it over the existing SSH connection as the remote command's standard input, and unpacks it into `~/.reach/ansible/<project-id>/` on the host — replacing what was there, so what runs is what is on your disk now. The output says so: *Synced 14 files (38 KB) to ~/.reach/ansible/…*. Nothing is written anywhere on the way that another user could read, and nothing of yours on the host is touched.
+
+### Hosts from your sessions
+
+Reach already knows what an inventory entry needs — address, port, user, key, the bastion in front — for every session you have saved. In the **Inventory** tab, **From sessions…** lists them; tick the ones that belong here and they become hosts: the session's tags become groups, a key becomes `ansible_ssh_private_key_file`, the first jump hop becomes `-o ProxyJump=…` in `ansible_ssh_common_args`. Sessions already in the inventory are shown greyed. A password is never written to an inventory: a password session becomes a host with no credential, Ansible asks for it (`--ask-pass`), or you give the session a key.
+
+### Dry run first
+
+**Dry run** runs the playbook with `--check --diff`: every task reports what it *would* change, templates and files show their diff, and nothing on the hosts changes. It is the button to reach for before **Run Playbook** on anything that matters.
+
+### Reading a run
+
+A playbook run is shown as what it is — plays, tasks, hosts — instead of a wall of text. Each task is a row coloured by the worst thing that happened on it, with a chip per host: green *ok*, amber *changed*, red *failed* or *unreachable*, grey *skipped*, amber *ignored* for a failure the playbook chose to forgive. A failed host's message sits under its task. The recap is the footer, per host and in total, and the verdict chip says whether the run finished clean. Commands that produce no plays — galaxy, vault, inventory — show their output as text, and **Raw log** switches any run back to exactly what Ansible wrote.
+
+This reads the default callback's output, the same lines every CI system reads; nothing about your `ansible.cfg` has to change. Colour is turned off for the run so the lines parse.
+
+### The vault password
+
+A project's vault password is stored in Reach's own vault and never appears on a command line. For a run it is written to a file only your user can read — under Reach's data directory locally, or in the project's remote directory with mode 600 — passed with `--vault-password-file`, and removed when the run ends.
+
+## Installing Ansible
+
+If Ansible isn't detected, the setup screen shows an **Install** button. The install process:
+
+1. Reach looks for `pipx`, `pip3`, or `pip` (in that order)
+2. Runs the install command (e.g., `pipx install ansible` or `pip3 install --user ansible`)
+3. Streams the installation output in real-time so you can see what's happening
+4. When it finishes, a **Continue** button appears
+5. Click Continue and Reach re-checks the tool status
+
+On Windows, the install happens inside WSL. On Linux/macOS, it runs directly.
+
+## Projects
+
+Everything in the Ansible workspace is organized around projects. A project is a directory on disk that contains your playbooks, inventory files, roles, and other Ansible content. Project metadata (name, description, inventory configuration) is stored encrypted in the Reach vault.
+
+### Creating a project
+
+Click **New Project** on the project list screen. You'll get a modal with three fields:
+
+- **Project Name** — whatever you want to call it
+- **Project Path** — the directory where your Ansible files live. Click **Browse** to open a folder picker, or type the path manually.
+- **Description** — optional, for your own reference
+
+When you click **Create**, Reach creates the directory (if it doesn't exist), scaffolds a starter `site.yml` playbook and `inventory.ini` file, and saves the project metadata to the vault.
+
+### Project list
+
+The project list shows cards for each project with:
+
+- Project name
+- Truncated path
+- Description (if set, max 2 lines)
+- Last opened timestamp
+
+Click a card to open the project workspace. To delete a project, click the trash icon — you'll get a confirmation dialog first. Deleting a project removes the metadata from the vault but doesn't touch the files on disk.
+
+## Workspace
+
+When you open a project, you get a two-panel layout.
+
+### Left panel — file browser
+
+Shows all files in the project directory. Supported file types: `.yml`, `.yaml`, `.ini`, `.cfg`, `.j2`, `.json`, `.txt`, `.md`. Click a file to view its contents in the right panel.
+
+The panel can be collapsed with the chevron button to give more room to the main content. A **Back to Projects** button at the bottom takes you back to the project list.
+
+### Right panel — four tabs and a run bar
+
+| Tab | What it holds |
+|-----|---------------|
+| **Playbooks** | The run: pick a playbook, an inventory and extra arguments on the run bar, then **Syntax check**, **Dry run** or **Run**. The result fills the page below. |
+| **Inventory** | Visual host and group editor |
+| **Dependencies** | Ansible Galaxy roles and collections, installed and removed from one place |
+| **Vault** | Encrypt, decrypt, and view vault files |
+
+### The run bar
+
+The run bar is above every tab. **Engine** is where Ansible runs: this machine, WSL, a container, or any open SSH session to a Linux host. When nothing on this machine can run Ansible the picker says so and the run buttons stay off until you choose a remote host. Next to the engine, **Ad hoc** opens a small dialog for a one-off command without a playbook; its result shows on Playbooks like every other run.
+
+On Playbooks the run bar also carries the playbook, the inventory and the extra arguments. With one playbook and one inventory in the project they are chosen for you.
+
+## Playbooks
+
+- **Playbook** — every `.yml` and `.yaml` file in the project. Required.
+- **Inventory** — every `.ini` and `.cfg` file and any file named `hosts`. Optional.
+- **Extra arguments** — flags such as `-v`, `--tags deploy`, `--limit webservers`.
+
+**Run** executes `ansible-playbook <playbook> [-i inventory] [extra args]`. **Dry run** adds `--check --diff`: what would change, with the diff, changing nothing. **Syntax check** runs `--syntax-check`. All three stay off while a command is running or no engine is chosen.
+
+## Inventory
+
+The Inventory tab is a visual editor for managing hosts and groups. Instead of hand-editing INI files, you build the inventory through the UI and Reach generates the file for you.
+
+### Hosts
+
+Click **Add Host** to create a new host entry. Each host has:
+
+- **Name** — logical name (e.g., `web1`)
+- **Address** — IP or hostname (e.g., `192.168.1.10`)
+- **Port** — SSH port (e.g., `22`)
+- **User** — SSH username (e.g., `admin`)
+- **Groups** — comma-separated group names this host belongs to
+
+Click a host card to edit it. Changes are local until you save.
+
+### Groups
+
+Click **Add Group** to create a group. Each group has:
+
+- **Name** — group name (e.g., `webservers`)
+- **Children** — comma-separated child group names for group nesting
+
+Click a group card to edit it.
+
+### Saving and generating
+
+Two buttons at the bottom:
+
+- **Save** — persists the host and group configuration to the vault. This saves the structured data, not a file.
+- **Generate INI** — builds the inventory in standard INI format and shows a preview. The preview includes `[group]` sections, `[group:vars]`, and `[group:children]` blocks.
+
+When the INI preview is showing, a **Write Inventory** button appears. Click it to write the generated INI to `inventory.ini` in your project directory. The file list refreshes automatically.
+
+## Dependencies
+
+### Roles
+
+The Roles section of the Dependencies tab manages Ansible Galaxy roles.
+
+**Install row:**
+- Text input for the role name (e.g., `geerlingguy.apache` or a Git URL)
+- **Install Role** button — runs `ansible-galaxy role install <name>` in the project directory
+
+**Installed roles list:**
+- Each role shows its name and version (if detected)
+- **Remove** button on each role — runs `ansible-galaxy role remove <name>`
+
+The list refreshes automatically after install or remove operations.
+
+### Collections
+
+The Collections section manages Ansible Galaxy collections.
+
+**Install row:**
+- Text input for the collection name (e.g., `community.general`)
+- **Install Collection** button — runs `ansible-galaxy collection install <name>`
+
+**Installed collections list:**
+- Each collection shows its `namespace.name` format and version
+- Collections are detected by scanning the `collections/ansible_collections/` directory structure
+
+## Ad hoc
+
+**Ad hoc** on the run bar opens a dialog for one-off Ansible commands without a playbook.
+
+**Inputs:**
+- **Host Pattern** — who to target (e.g., `all`, `webservers`, `192.168.1.*`). Defaults to `all`.
+- **Module** — dropdown with common modules: `ping`, `shell`, `command`, `copy`, `yum`, `apt`, `service`, `file`, `setup`, `debug`
+- **Module Arguments** — arguments for the selected module (e.g., `name=httpd state=present` for yum)
+- **Inventory File** — optional inventory file selector (same as Playbooks tab)
+
+**Button:**
+- **Run** — executes `ansible <pattern> -m <module> [-a "args"] [-i inventory]`
+
+Example: selecting host pattern `all`, module `ping`, no args, runs `ansible all -m ping` — a quick way to check if all hosts are reachable.
+
+## Vault
+
+The Vault tab handles Ansible Vault encryption operations on files in your project.
+
+**Input:**
+- **Vault File** — dropdown listing all files in the project
+
+**Buttons** (appear after selecting a file):
+- **Encrypt** — runs `ansible-vault encrypt <file>` to encrypt a plaintext file
+- **Decrypt** — runs `ansible-vault decrypt <file>` to decrypt an encrypted file
+- **View** — runs `ansible-vault view <file>` to display the decrypted contents without modifying the file on disk
+
+Output from these operations streams to the command output panel on the right.
+
+## Command output
+
+Every run — playbooks, ad hoc, roles, vault — shows in the same streaming result. It shows:
+
+- **stdout** lines in the default text color
+- **stderr** lines in red
+- **System messages** (command start, finish, exit code) in the accent color
+
+The output auto-scrolls as new lines arrive. A **Clear** button in the top-right corner empties the output. While a command is running, a spinner and "Command running..." indicator appear.
+
+Under the hood, commands are executed asynchronously. The backend spawns a process, assigns it a unique run ID, and emits events (`ansible-output-{runId}`) as lines come in. The frontend subscribes to these events and appends them to the output in real-time.
+
+## Data storage
+
+Project metadata, inventory configuration, and vault passwords are stored encrypted in the Reach vault using the same XChaCha20-Poly1305 encryption used for SSH sessions and credentials. The actual playbook files, inventory files, and roles live on disk in whatever directory you pointed the project to.
+
+Projects persist across app restarts. When you reopen Reach, your project list is loaded from the vault and ready to go.

@@ -1,0 +1,116 @@
+---
+/**
+ * Google Ads conversion measurement, only after a visitor says yes.
+ *
+ * Google's script is not loaded at all until Accept is chosen (Consent Mode
+ * "basic"): no request reaches Google, and no cookie is set, for anyone who
+ * declines or never answers. Google's other mode loads the script for everyone
+ * and sends cookieless pings even after a decline, which would make the
+ * privacy page untrue.
+ *
+ * The choice is kept in this browser's localStorage and nowhere else. The
+ * privacy page has a button (id="ads-consent-change") that asks again.
+ *
+ * A click on a link to a release file (.../releases/download/...) counts as
+ * the "Download" conversion, only once the tag is loaded, which is only after
+ * Accept. It is sent as a beacon, so it survives the page leaving for GitHub.
+ */
+const TAG = 'AW-18507456816';
+const DOWNLOAD = 'AW-18507456816/3bbVCI3Bw5kdELDChflE';
+const PRIVACY = `${import.meta.env.BASE_URL.replace(/\/?$/, '/')}privacy/`;
+---
+
+<script is:inline define:vars={{ TAG, PRIVACY, DOWNLOAD }}>
+	(() => {
+		const KEY = 'reach-ads-consent';
+		window.dataLayer = window.dataLayer || [];
+		function gtag() {
+			window.dataLayer.push(arguments);
+		}
+		const read = () => {
+			try {
+				return localStorage.getItem(KEY);
+			} catch {
+				return null;
+			}
+		};
+		const write = (v) => {
+			try {
+				v ? localStorage.setItem(KEY, v) : localStorage.removeItem(KEY);
+			} catch {}
+		};
+
+		let loaded = false;
+		const load = () => {
+			if (loaded) return;
+			loaded = true;
+			gtag('consent', 'default', {
+				ad_storage: 'granted',
+				ad_user_data: 'granted',
+				ad_personalization: 'granted',
+				analytics_storage: 'denied',
+			});
+			gtag('js', new Date());
+			gtag('config', TAG);
+			const s = document.createElement('script');
+			s.async = true;
+			s.src = `https://www.googletagmanager.com/gtag/js?id=${TAG}`;
+			document.head.appendChild(s);
+		};
+
+		const banner = () => {
+			if (document.getElementById('ads-consent')) return;
+			const box = document.createElement('div');
+			box.id = 'ads-consent';
+			box.setAttribute('role', 'dialog');
+			box.setAttribute('aria-label', 'Cookie choice');
+			box.innerHTML =
+				'<p>May reachssh.com use Google Ads cookies to see which ads bring visitors here? ' +
+				'Nothing is sent to Google unless you accept. ' +
+				`<a href="${PRIVACY}#this-website">Details</a></p>` +
+				'<div><button type="button" data-v="denied">Decline</button>' +
+				'<button type="button" data-v="granted" class="primary">Accept</button></div>';
+			box.addEventListener('click', (e) => {
+				const v = e.target.closest('button')?.dataset.v;
+				if (!v) return;
+				write(v);
+				box.remove();
+				// Google Ads keeps its cookies under _gcl_ and _gac_ names.
+				if (v === 'denied')
+					for (const c of document.cookie.split(';')) {
+						const name = c.split('=')[0].trim();
+						if (/^_(gcl|gac)_/.test(name))
+							for (const d of ['', location.hostname, '.' + location.hostname.replace(/^www\./, '')])
+								document.cookie = `${name}=; Max-Age=0; path=/${d ? '; domain=' + d : ''}`;
+					}
+				if (v === 'granted') load();
+				// A decline after an earlier accept: the script already on the
+				// page cannot be unloaded, so a reload leaves it out.
+				else if (loaded) location.reload();
+			});
+			document.body.appendChild(box);
+		};
+
+		document.addEventListener(
+			'click',
+			(e) => {
+				const a = e.target.closest?.('a[href]');
+				if (!loaded || !a || !/\/releases\/(latest\/)?download\//.test(a.href)) return;
+				gtag('event', 'conversion', { send_to: DOWNLOAD, transport_type: 'beacon' });
+			},
+			true,
+		);
+
+		const choice = read();
+		if (choice === 'granted') load();
+
+		const ready = () => {
+			if (choice !== 'granted' && choice !== 'denied') banner();
+			document.getElementById('ads-consent-change')?.addEventListener('click', () => {
+				write(null);
+				banner();
+			});
+		};
+		document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', ready) : ready();
+	})();
+</script>

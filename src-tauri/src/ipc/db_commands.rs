@@ -1,0 +1,1571 @@
+//! IPC for the Databases workspace. Every command checks the DevOps switch
+//! first; see `crate::devops`.
+
+use std::io::{BufWriter, Write};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+use tauri::{Emitter, State};
+
+use crate::db::backup::{self, DumpOptions, Progress, Summary};
+use crate::db::conn::{open_forward, Forward, LiveDb, META};
+use crate::db::design::{self, DdlPlan, TableDesign};
+use crate::db::detect::{self, Detected};
+use crate::db::dialect::{self, RowEdit};
+use crate::db::guard::{self, Risk, Statement};
+use crate::db::introspect;
+use crate::db::redis::{self as rds, KeyValue, LiveRedis, Reply, ScanPage};
+use crate::db::types::{
+    DbConnection, DbConnectionView, DbObject, Engine, ResultSet, Route, ServerInfo, ServerSession,
+};
+use crate::db::{csv, Live};
+use crate::devops::{self, Tool};
+use crate::ssh::client::{AuthParams, HeadlessConnection, JumpHostParams, KeySource, SharedHandle, SshManager};
+use crate::state::{AppState, AuthMethod};
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Saved connections
+
+#[tauri::command]
+pub async fn db_list_connections(state: State<'_, AppState>) -> Result<Vec<DbConnectionView>, String> {
+    devops::require(Tool::Databases)?;
+    let mut vault = state.vault_manager.lock().await;
+    let mut db = state.db.lock().await;
+    db.store.ensure_loaded(&mut vault).await?;
+    Ok(db.store.list().iter().map(DbConnectionView::from).collect())
+}
+
+/// Fill in what the form leaves out: a new id, and the stored password when
+/// the user did not type a new one (the form never receives it back).
+async fn complete(state: &State<'_, AppState>, mut conn: DbConnection, keep_password: bool) -> Result<DbConnection, String> {
+    if conn.id.is_empty() {
+        conn.id = uuid::Uuid::new_v4().to_string();
+    }
+    if conn.password_ref.is_some() {
+        // A password manager holds it: no plaintext copy is kept or used.
+        conn.password = None;
+    } else if keep_password && conn.password.as_deref().is_none_or(str::is_empty) {
+        let mut vault = state.vault_manager.lock().await;
+        let mut db = state.db.lock().await;
+        db.store.ensure_loaded(&mut vault).await?;
+        conn.password = db.store.get(&conn.id).and_then(|c| c.password.clone());
+    }
+    if conn.engine == Engine::Sqlite && conn.route != Route::Direct {
+        return Err("A SQLite file is opened on this device; it cannot go through SSH".into());
+    }
+    Ok(conn)
+}
+
+#[tauri::command]
+pub async fn db_save_connection(
+    state: State<'_, AppState>,
+    connection: DbConnection,
+    keep_password: bool,
+) -> Result<DbConnectionView, String> {
+    devops::require(Tool::Databases)?;
+    if connection.name.trim().is_empty() {
+        return Err("Give the connection a name".into());
+    }
+    if matches!(connection.route, Route::Live { .. }) {
+        return Err("A terminal tab's connection ends with the tab. Save it through its saved session instead.".into());
+    }
+    let mut conn = complete(&state, connection, keep_password).await?;
+    // Saving is the user's word that the password may go through the route
+    // session as it now is: signed here, checked on every open.
+    conn.route_approval = None;
+    if let Some((r, session_id)) = ref_through_session(&conn).map(|(r, s)| (r.clone(), s.to_owned())) {
+        let s = crate::ipc::session_commands::stored_session(&state, &session_id).await?;
+        require_ssh_route(&s)?;
+        check_route_shown(&conn, &s)?;
+        let vault = state.vault_manager.lock().await;
+        let (key, who) = (vault.approval_key(), vault.get_user_uuid());
+        if let (Some(k), Some(w)) = (key.as_deref(), who.as_deref()) {
+            conn.route_approval = Some(sign_route(k, w, &conn.id, &r, &s));
+        }
+    }
+    let mut vault = state.vault_manager.lock().await;
+    let mut db = state.db.lock().await;
+    db.store.ensure_loaded(&mut vault).await?;
+    db.store.save(conn.clone(), &mut vault).await?;
+    Ok(DbConnectionView::from(&conn))
+}
+
+// ---------------------------------------------------------------------------
+// A password manager entry through a saved session.
+//
+// A connection's own password manager entry needs no approval (see
+// `open_live`), but the route session it goes through may sit in a shared
+// vault, where another member can point it at a server of theirs. So the
+// user's saving of the connection is signed against that session as it was
+// (its `approval_context`, the same one its own approvals use), and a
+// saved connection opens only while that still holds.
+
+/// The entry and the route session of a connection whose password manager
+/// entry goes through a saved session; `None` for every other connection. A
+/// direct route depends on nothing shared, and a terminal tab's route is a
+/// connection the user opened themselves and is never saved.
+fn ref_through_session(conn: &DbConnection) -> Option<(&crate::pwmanager::SecretRef, &str)> {
+    match (conn.password_ref.as_ref(), &conn.route) {
+        (Some(r), Route::Session { session_id }) => Some((r, session_id.as_str())),
+        _ => None,
+    }
+}
+
+/// What the user said yes to: this connection sending this entry.
+fn route_what(conn_id: &str, r: &crate::pwmanager::SecretRef) -> String {
+    format!("db:{conn_id}\t{}\t{}", r.provider, r.entry_id)
+}
+
+/// The signature stored in `DbConnection::route_approval`.
+pub(crate) fn sign_route(
+    key: &[u8; 32],
+    who: &str,
+    conn_id: &str,
+    r: &crate::pwmanager::SecretRef,
+    route_session: &crate::state::SessionConfig,
+) -> String {
+    use crate::ssh::sshconf::approvals::{sign, Kind};
+    let context = crate::ipc::session_commands::approval_context(route_session);
+    sign(key, who, Kind::SecretRef, &context, &route_what(conn_id, r))
+}
+
+/// The message a saved connection is refused with once its route session
+/// changed. The frontend recognises the code before the colon and shows its
+/// own translation.
+pub const ROUTE_CHANGED: &str = "DB_ROUTE_CHANGED: The session this connection goes through has changed since you saved it. Open the connection in the database editor and save it again to confirm.";
+
+/// A saved connection's password may go through its route session as that
+/// session now is: the user's own signature from saving it still holds.
+pub(crate) fn check_route_approval(
+    key: Option<&[u8; 32]>,
+    who: Option<&str>,
+    conn: &DbConnection,
+    r: &crate::pwmanager::SecretRef,
+    route_session: &crate::state::SessionConfig,
+) -> Result<(), String> {
+    use crate::ssh::sshconf::approvals::{verified, Kind};
+    let context = crate::ipc::session_commands::approval_context(route_session);
+    let what = route_what(&conn.id, r);
+    let ok = match (key, who, conn.route_approval.as_ref()) {
+        (Some(k), Some(w), Some(a)) => verified(std::slice::from_ref(a), k, w, Kind::SecretRef, &context).contains(&what),
+        _ => false,
+    };
+    if ok { Ok(()) } else { Err(ROUTE_CHANGED.to_string()) }
+}
+
+/// The message Save, Test or Connect from the form is refused with when the
+/// route session is not, or no longer, what the form showed. The frontend
+/// recognises the code before the colon, shows its own translation and
+/// reads the route again.
+pub const ROUTE_UNCONFIRMED: &str = "DB_ROUTE_UNCONFIRMED: The session this connection goes through is not what the editor showed; check where it goes and try again.";
+
+/// The form showed the route session as it now is: the user saw where the
+/// password would go (host, jump hosts, proxy, ssh_config lines) before
+/// choosing it. Picking a session by its name is not enough, since another
+/// member of a shared vault can re-point it.
+pub(crate) fn check_route_shown(conn: &DbConnection, route_session: &crate::state::SessionConfig) -> Result<(), String> {
+    let now = crate::ipc::session_commands::approval_context(route_session);
+    if conn.route_context.as_deref() == Some(now.as_str()) { Ok(()) } else { Err(ROUTE_UNCONFIRMED.to_string()) }
+}
+
+/// Where a session a connection would go through really leads, for the
+/// editor to show; `context` goes back with Save, Test and Connect.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutePreview {
+    pub route: crate::ipc::session_commands::ViaRoute,
+    pub context: String,
+}
+
+#[tauri::command]
+pub async fn db_route_preview(state: State<'_, AppState>, session_id: String) -> Result<RoutePreview, String> {
+    devops::require(Tool::Databases)?;
+    let s = crate::ipc::session_commands::stored_session(&state, &session_id).await?;
+    require_ssh_route(&s)?;
+    Ok(RoutePreview {
+        route: crate::ipc::session_commands::via_route(&s),
+        context: crate::ipc::session_commands::approval_context(&s),
+    })
+}
+
+/// Only an SSH session can carry a route: an RDP or VNC session's host and
+/// login are not an SSH server's.
+pub(crate) fn require_ssh_route(s: &crate::state::SessionConfig) -> Result<(), String> {
+    if s.kind == crate::state::SessionKind::Ssh {
+        Ok(())
+    } else {
+        Err(format!("'{}' is not an SSH session, so nothing can go through it. Choose an SSH session to go through.", s.name))
+    }
+}
+
+#[tauri::command]
+pub async fn db_delete_connection(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    devops::require(Tool::Databases)?;
+    let live = state.db.lock().await.remove(&id);
+    close(live).await;
+    let mut vault = state.vault_manager.lock().await;
+    let mut db = state.db.lock().await;
+    db.store.ensure_loaded(&mut vault).await?;
+    db.store.delete(&id, &mut vault).await
+}
+
+// ---------------------------------------------------------------------------
+// Connecting
+
+/// Who a login is for, to ask for a password that is not saved.
+struct LoginFor<'a> {
+    app: &'a tauri::AppHandle,
+    host: &'a str,
+    port: u16,
+    username: &'a str,
+}
+
+async fn auth_for(state: &State<'_, AppState>, method: &AuthMethod, try_agent_keys: bool, who: LoginFor<'_>) -> Result<AuthParams, String> {
+    use crate::ipc::ssh_commands::{build_auth, resolve_key_source};
+    use crate::ssh::prompt::{ask, Field, Kind};
+    // A password or passphrase held by a password manager, fetched now.
+    let method = crate::pwmanager::fill_auth_method(state, method).await?;
+    match &method {
+        AuthMethod::Password { password, .. } => {
+            // Not saving a password is the safer choice. Ask for it, as a
+            // terminal tab does, instead of failing with "Password required"
+            // and a Try again that could never work.
+            let password = match password.clone().filter(|p| !p.is_empty()) {
+                Some(p) => p,
+                None => ask(
+                    Some(who.app),
+                    who.host,
+                    who.port,
+                    Kind::Password,
+                    &format!("Password for {}@{}", who.username, who.host),
+                    "",
+                    vec![Field { text: "Password".into(), echo: false }],
+                )
+                .await
+                .and_then(|a| a.into_iter().next())
+                .filter(|p| !p.is_empty())
+                .ok_or("No password was given")?,
+            };
+            build_auth("password", Some(password), None, None, false)
+        }
+        AuthMethod::Key { path, passphrase, key_content, key_id, .. } => {
+            let (source, stored) = match key_content.clone().filter(|k| !k.trim().is_empty()) {
+                Some(k) => (Some(KeySource::Material(k)), None),
+                None => resolve_key_source(state, key_id.clone(), path.clone()).await?,
+            };
+            build_auth("key", None, source, passphrase.clone().filter(|p| !p.is_empty()).or(stored), try_agent_keys)
+        }
+        AuthMethod::Agent => build_auth("agent", None, None, None, false),
+    }
+}
+
+/// The SSH leg, if the connection has one. `pin` as for [`forward_route`].
+async fn forward_for(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+    conn: &DbConnection,
+    pin: Option<&str>,
+) -> Result<Option<Forward>, String> {
+    let host = if conn.host.trim().is_empty() { "127.0.0.1".to_string() } else { conn.host.trim().to_string() };
+    let port = if conn.port == 0 { conn.engine.default_port() } else { conn.port };
+    forward_route_pinned(app, state, &conn.route, host, port, pin).await
+}
+
+/// The SSH leg to `host:port` for a route, if it has one: a loopback port
+/// that reaches it through the SSH server. Shared with containers and
+/// clusters.
+pub(crate) async fn forward_route(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+    route: &Route,
+    host: String,
+    port: u16,
+) -> Result<Option<Forward>, String> {
+    forward_route_pinned(app, state, route, host, port, None).await
+}
+
+/// [`forward_route`] through a route session that must still be what a
+/// secret about to travel through it was approved for: `pin` is that
+/// session's `approval_context` as it was checked. If it changed since, the
+/// login is not made. Used by VNC through an SSH session and by a database
+/// connection's password manager entry.
+pub(crate) async fn forward_route_pinned(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+    route: &Route,
+    host: String,
+    port: u16,
+    pin: Option<&str>,
+) -> Result<Option<Forward>, String> {
+    match ssh_for_route_pinned(app, state, route, pin).await? {
+        None => Ok(None),
+        Some((handle, ssh)) => open_forward(handle, ssh, host, port).await.map(Some),
+    }
+}
+
+/// The SSH connection a route goes through: a terminal tab's own, or a new
+/// login with a saved session's settings (kept alive by the returned
+/// connection). `None` for a direct route. Shared with VNC and containers.
+pub(crate) async fn ssh_for_route(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+    route: &Route,
+) -> Result<Option<(SharedHandle, Option<HeadlessConnection>)>, String> {
+    ssh_for_route_pinned(app, state, route, None).await
+}
+
+/// [`ssh_for_route`]; `pin` as for [`forward_route_pinned`].
+async fn ssh_for_route_pinned(
+    app: &tauri::AppHandle,
+    state: &State<'_, AppState>,
+    route: &Route,
+    pin: Option<&str>,
+) -> Result<Option<(SharedHandle, Option<HeadlessConnection>)>, String> {
+    match route {
+        Route::Direct => Ok(None),
+        Route::Live { connection_id } => {
+            let handle = state
+                .ssh_manager
+                .lock()
+                .await
+                .get_handle(connection_id)
+                .map_err(|_| "That terminal tab is no longer connected".to_string())?;
+            Ok(Some((handle, None)))
+        }
+        Route::Session { session_id } => {
+            let mut s = crate::ipc::session_commands::session_get(state.clone(), session_id.clone()).await?;
+            require_ssh_route(&s)?;
+            if pin.is_some_and(|p| p != crate::ipc::session_commands::approval_context(&s)) {
+                return Err(format!("The SSH session '{}' changed while connecting. Connect again.", s.name));
+            }
+            // Only the approvals of the person connecting count (session_get
+            // has checked their signatures).
+            s.ssh_options = s.ssh_options.map(|o| o.effective());
+            // The same for its password manager entries: each must be one
+            // this person approved for this session as it is. The error says
+            // which, for the session list to ask. An SSH session goes
+            // through no other session.
+            crate::ipc::session_commands::require_trusted_refs(&s, None, &crate::ipc::session_commands::slots_in_use(&s))?;
+            // Every entry of the session, its jump hosts and its proxy in one
+            // operation: a password manager passphrase that must be asked
+            // for is asked once (or not at all, inside a connect that already
+            // has it).
+            let reason = crate::pwmanager::Reason::Connect(s.name.clone());
+            let (auth, jumps, proxy) = crate::pwmanager::with_prompt(app, reason, async {
+                let who = LoginFor { app, host: &s.host, port: s.port, username: &s.username };
+                let auth = auth_for(state, &s.auth_method, s.try_agent_keys.unwrap_or(false), who).await?;
+                let mut jumps = Vec::new();
+                for j in s.jump_chain.clone().unwrap_or_default() {
+                    let opts = crate::ssh::sshconf::session::plan_for(s.ssh_options.as_ref(), &j.host, j.port, &j.username, true).into();
+                    let who = LoginFor { app, host: &j.host, port: j.port, username: &j.username };
+                    let auth = auth_for(state, &j.auth_method, false, who).await?;
+                    jumps.push(JumpHostParams { auth, host: j.host, port: j.port, username: j.username, opts });
+                }
+                // The proxy is used only without jump hosts.
+                let mut proxy = s.proxy.clone();
+                if jumps.is_empty() {
+                    crate::pwmanager::fill_proxy(state, &mut proxy).await?;
+                }
+                Ok::<_, String>((auth, jumps, proxy))
+            })
+            .await?;
+            let opts = crate::ssh::sshconf::session::plan_for(s.ssh_options.as_ref(), &s.host, s.port, &s.username, false).into();
+            let ssh = SshManager::open_headless(&s.host, s.port, &s.username, auth, jumps, proxy, app.clone(), opts)
+                .await
+                .map_err(|e| format!("SSH to {}: {e}", s.name))?;
+            Ok(Some((ssh.handle.clone(), Some(ssh))))
+        }
+    }
+}
+
+/// Where a connection comes from, which decides whether its route needs the
+/// user's saved word (see [`check_route_approval`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Saved, read from the store.
+    Saved,
+    /// The form the user is filling in or just filled in (Test, or Connect
+    /// without saving): the route in it is what they chose, now.
+    Form,
+}
+
+/// Connect. Every connection, tested, opened or reopened, comes through here,
+/// so this is where a password held by a password manager is fetched; the
+/// open connection keeps it in memory for its sessions, as it keeps a stored
+/// one, until it is closed.
+async fn open_live(app: &tauri::AppHandle, state: &State<'_, AppState>, mut conn: DbConnection, origin: Origin) -> Result<Live, String> {
+    // The connection's own reference needs no approval: saved connections
+    // live in the private `__databases__` vault, which only this identity
+    // writes, and an unsaved one comes from the user's own form (see
+    // `pwmanager::resolve_own`). The SSH leg, a saved session that may be in
+    // a shared vault, is checked in `ssh_for_route`: its own entries, and
+    // here, before the password is fetched, that a saved connection's
+    // password may go through it as it now is. The login is then made from
+    // the session exactly as checked (`pin`).
+    let mut pin = None;
+    if let Some((r, session_id)) = ref_through_session(&conn) {
+        let s = crate::ipc::session_commands::stored_session(state, session_id).await?;
+        require_ssh_route(&s)?;
+        if origin == Origin::Saved {
+            let vault = state.vault_manager.lock().await;
+            let (key, who) = (vault.approval_key(), vault.get_user_uuid());
+            check_route_approval(key.as_deref(), who.as_deref(), &conn, r, &s)?;
+        } else {
+            check_route_shown(&conn, &s)?;
+        }
+        pin = Some(crate::ipc::session_commands::approval_context(&s));
+    }
+    // The password and the SSH leg's entries are one operation: a password
+    // manager passphrase that must be asked for is asked once.
+    let reason = crate::pwmanager::Reason::Connect(conn.name.clone());
+    let forward = crate::pwmanager::with_prompt(app, reason, async {
+        if let Some(r) = conn.password_ref.as_ref() {
+            conn.password = Some(crate::pwmanager::resolve_own_to_string(state, r).await?);
+        }
+        forward_for(app, state, &conn, pin.as_deref()).await
+    })
+    .await?;
+    Ok(match conn.engine {
+        Engine::Redis => Live::Redis(Arc::new(LiveRedis::open(conn, forward).await?)),
+        _ => Live::Sql(Arc::new(LiveDb::open(conn, forward).await?)),
+    })
+}
+
+async fn close(live: Option<Live>) {
+    if let Some(Live::Sql(l)) = live {
+        l.close().await;
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Connected {
+    pub engine: Engine,
+    pub databases: Vec<String>,
+    pub default_database: String,
+    pub server: ServerInfo,
+}
+
+async fn describe_live(live: &Live) -> Result<Connected, String> {
+    match live {
+        Live::Sql(l) => {
+            let e = l.engine();
+            let db = l.default_database();
+            let session = l.session(&db, META).await?;
+            let mut s = session.lock().await;
+            let server = introspect::server_info(e, &mut s).await?;
+            let databases = introspect::databases(e, &mut s).await?;
+            Ok(Connected { engine: e, databases, default_database: db, server })
+        }
+        Live::Redis(r) => {
+            let info = r.info().await?;
+            let version = info
+                .iter()
+                .flat_map(|(_, kv)| kv.iter())
+                .find(|(k, _)| k == "redis_version" || k == "valkey_version")
+                .map(|(k, v)| format!("{} {v}", if k.starts_with("valkey") { "Valkey" } else { "Redis" }))
+                .unwrap_or_else(|| "Redis".into());
+            let databases = r.databases().await?.into_iter().map(|(n, _)| n.to_string()).collect();
+            Ok(Connected {
+                engine: Engine::Redis,
+                databases,
+                default_database: r.default_db().to_string(),
+                server: ServerInfo { version, current_database: Some(r.default_db().to_string()), current_user: None },
+            })
+        }
+    }
+}
+
+/// Try a connection from the form without saving it. Testing is the user's
+/// explicit act on the route the form showed them, so a password manager
+/// entry may go through the route session without the signature saving
+/// makes, as long as the session is still what was shown (see `Origin`);
+/// the session's own entries are still checked.
+#[tauri::command]
+pub async fn db_test_connection(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    connection: DbConnection,
+    keep_password: bool,
+) -> Result<ServerInfo, String> {
+    devops::require(Tool::Databases)?;
+    let conn = complete(&state, connection, keep_password).await?;
+    let live = open_live(&app, &state, conn, Origin::Form).await?;
+    let info = describe_live(&live).await.map(|c| c.server);
+    close(Some(live)).await;
+    info
+}
+
+/// Open a saved connection, or an unsaved one (a database found on a
+/// terminal tab's server). Reconnecting replaces the old connection. A
+/// saved one's password manager entry goes through a route session only
+/// while the user's signature from saving it holds; an unsaved one comes
+/// from the form, as for `db_test_connection`.
+#[tauri::command]
+pub async fn db_connect(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    connection: Option<DbConnection>,
+) -> Result<Connected, String> {
+    // Boxed: Tauri builds a command's future on the main thread and passes it
+    // by value before spawning it, and the main thread's stack is small
+    // (1 MB on Windows). Only a pointer is left there this way.
+    Box::pin(async move {
+        devops::require(Tool::Databases)?;
+        let (conn, origin) = match connection {
+            Some(c) => (complete(&state, DbConnection { id: id.clone(), ..c }, true).await?, Origin::Form),
+            None => {
+                let mut vault = state.vault_manager.lock().await;
+                let mut db = state.db.lock().await;
+                db.store.ensure_loaded(&mut vault).await?;
+                let mut c = db.store.get(&id).cloned().ok_or("That connection no longer exists")?;
+                c.last_used_at = now_ms();
+                let _ = db.store.save(c.clone(), &mut vault).await;
+                (c, Origin::Saved)
+            }
+        };
+        let target = format!("{:?} {}@{}:{} via {:?}", conn.engine, conn.username, conn.host, conn.port, conn.route);
+        let live = open_live(&app, &state, conn, origin).await.inspect_err(|e| tracing::warn!("db_connect {target}: {e}"))?;
+        let described = describe_live(&live).await;
+        let old = state.db.lock().await.insert(id, live);
+        close(old).await;
+        described
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_disconnect(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    devops::require(Tool::Databases)?;
+    let live = state.db.lock().await.remove(&id);
+    close(live).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tree
+
+async fn sql(state: &State<'_, AppState>, id: &str) -> Result<Arc<LiveDb>, String> {
+    devops::require(Tool::Databases)?;
+    state.db.lock().await.sql(id)
+}
+
+#[tauri::command]
+pub async fn db_databases(state: State<'_, AppState>, id: String) -> Result<Vec<String>, String> {
+    let l = sql(&state, &id).await?;
+    let session = l.session(&l.default_database(), META).await?;
+    let mut s = session.lock().await;
+    introspect::databases(l.engine(), &mut s).await
+}
+
+#[tauri::command]
+pub async fn db_schemas(state: State<'_, AppState>, id: String, database: String) -> Result<Vec<String>, String> {
+    let l = sql(&state, &id).await?;
+    let session = l.session(&database, META).await?;
+    let mut s = session.lock().await;
+    introspect::schemas(l.engine(), &mut s).await
+}
+
+#[tauri::command]
+pub async fn db_objects(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+) -> Result<Vec<DbObject>, String> {
+    let l = sql(&state, &id).await?;
+    let session = l.session(&database, META).await?;
+    let mut s = session.lock().await;
+    introspect::objects(l.engine(), &mut s, schema.as_deref().unwrap_or(&database)).await
+}
+
+#[tauri::command]
+pub async fn db_completion(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+    let l = sql(&state, &id).await?;
+    let session = l.session(&database, META).await?;
+    let mut s = session.lock().await;
+    introspect::completion_columns(l.engine(), &mut s, schema.as_deref().unwrap_or(&database)).await
+}
+
+#[tauri::command]
+pub async fn db_definition(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+    name: String,
+    kind: String,
+) -> Result<String, String> {
+    let l = sql(&state, &id).await?;
+    let session = l.session(&database, META).await?;
+    let mut s = session.lock().await;
+    let sch = schema.or_else(|| l.engine().is_mysql_family().then(|| database.clone()));
+    introspect::definition(l.engine(), &mut s, sch.as_deref(), &name, &kind).await
+}
+
+// ---------------------------------------------------------------------------
+// Running SQL
+
+#[tauri::command]
+pub fn db_analyze(engine: Engine, script: String) -> Result<Vec<Statement>, String> {
+    devops::require(Tool::Databases)?;
+    Ok(guard::analyze(engine, &script))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecError {
+    pub index: usize,
+    pub statement: String,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
+pub enum ExecOutcome {
+    /// Nothing ran; these statements need a yes first.
+    Confirm { statements: Vec<Statement> },
+    /// Ran until done or until `error`; `results` holds what finished.
+    Done { results: Vec<ResultSet>, error: Option<ExecError> },
+}
+
+/// Refuse or hold back a script according to the connection's settings.
+fn gate(conn: &DbConnection, statements: &[Statement], confirmed: bool) -> Result<Option<Vec<Statement>>, String> {
+    if conn.read_only {
+        if let Some(s) = statements.iter().find(|s| !matches!(s.risk, Risk::Read | Risk::Session)) {
+            let head: String = s.sql.chars().take(60).collect();
+            return Err(format!("This connection is read-only, so \"{head}…\" was not run"));
+        }
+    }
+    if confirmed {
+        return Ok(None);
+    }
+    let risky: Vec<Statement> = statements
+        .iter()
+        .filter(|s| matches!(s.risk, Risk::Danger(_)) || (conn.production && s.risk == Risk::Write))
+        .cloned()
+        .collect();
+    Ok((!risky.is_empty()).then_some(risky))
+}
+
+#[tauri::command]
+pub async fn db_execute(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    owner: String,
+    script: String,
+    confirmed: bool,
+    max_rows: Option<usize>,
+) -> Result<ExecOutcome, String> {
+    let l = sql(&state, &id).await?;
+    let statements = guard::analyze(l.engine(), &script);
+    if statements.is_empty() {
+        return Err("There is no SQL to run".into());
+    }
+    if let Some(risky) = gate(&l.config, &statements, confirmed)? {
+        return Ok(ExecOutcome::Confirm { statements: risky });
+    }
+    let session = l.session(&database, &owner).await?;
+    let mut s = session.lock().await;
+    let mut results = Vec::new();
+    for (i, st) in statements.iter().enumerate() {
+        match s.run_all(&st.sql, max_rows.unwrap_or(1000)).await {
+            Ok(sets) => results.extend(sets),
+            Err(message) => {
+                return Ok(ExecOutcome::Done { results, error: Some(ExecError { index: i, statement: st.sql.clone(), message }) });
+            }
+        }
+    }
+    Ok(ExecOutcome::Done { results, error: None })
+}
+
+#[tauri::command]
+pub async fn db_cancel(state: State<'_, AppState>, id: String, database: String, owner: String) -> Result<(), String> {
+    let l = sql(&state, &id).await?;
+    l.cancel(&database, &owner).await
+}
+
+/// A query tab closed: give its server session back.
+#[tauri::command]
+pub async fn db_close_session(state: State<'_, AppState>, id: String, database: String, owner: String) -> Result<(), String> {
+    let l = sql(&state, &id).await?;
+    l.drop_session(&database, &owner).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Table data
+
+#[derive(Deserialize)]
+pub struct SortKey {
+    pub column: String,
+    pub desc: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TablePage {
+    pub result: ResultSet,
+    /// Only counted for the first page.
+    pub total: Option<i64>,
+}
+
+/// The owning schema to qualify a table with. MySQL calls its databases
+/// schemas; SQLite has none worth naming.
+fn owner_schema(engine: Engine, database: &str, schema: Option<String>) -> Option<String> {
+    match engine {
+        Engine::Mysql | Engine::Mariadb => Some(schema.unwrap_or_else(|| database.to_string())),
+        Engine::Sqlite => None,
+        _ => schema,
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn db_table_rows(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+    table: String,
+    offset: u64,
+    limit: u64,
+    order: Vec<SortKey>,
+    filter: Option<String>,
+) -> Result<TablePage, String> {
+    let l = sql(&state, &id).await?;
+    let e = l.engine();
+    let sch = owner_schema(e, &database, schema);
+    let t = dialect::qualified(e, sch.as_deref(), &table);
+    let filter = filter.map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+    let wher = filter.as_ref().map(|f| format!(" WHERE {f}")).unwrap_or_default();
+    let order_sql = (!order.is_empty()).then(|| {
+        order
+            .iter()
+            .map(|k| format!("{}{}", dialect::ident(e, &k.column), if k.desc { " DESC" } else { "" }))
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
+    let select = dialect::page(e, &format!("SELECT * FROM {t}{wher}"), order_sql.as_deref(), limit, offset);
+
+    // The filter is typed by the user; it must not smuggle in a second
+    // statement or a write.
+    let check = guard::analyze(e, &select);
+    if check.len() != 1 || check[0].risk != Risk::Read {
+        return Err("The filter must be a condition, like  status = 'open'".into());
+    }
+
+    let session = l.session(&database, META).await?;
+    let mut s = session.lock().await;
+    let result = s.run(&select, limit as usize).await?;
+    let total = if offset == 0 {
+        s.run(&format!("SELECT COUNT(*) FROM {t}{wher}"), 1)
+            .await
+            .ok()
+            .and_then(|rs| rs.rows.first().and_then(|r| r.first().cloned().flatten()))
+            .and_then(|v| v.parse().ok())
+    } else {
+        None
+    };
+    Ok(TablePage { result, total })
+}
+
+#[tauri::command]
+pub async fn db_table_design(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+    table: String,
+) -> Result<TableDesign, String> {
+    let l = sql(&state, &id).await?;
+    let e = l.engine();
+    let session = l.session(&database, META).await?;
+    let mut s = session.lock().await;
+    introspect::table(e, &mut s, owner_schema(e, &database, schema).as_deref(), &table).await
+}
+
+#[tauri::command]
+pub async fn db_preview_edits(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+    table: String,
+    edits: Vec<RowEdit>,
+) -> Result<Vec<String>, String> {
+    let l = sql(&state, &id).await?;
+    let e = l.engine();
+    dialect::row_edits(e, owner_schema(e, &database, schema).as_deref(), &table, &edits)
+}
+
+#[tauri::command]
+pub async fn db_apply_edits(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+    table: String,
+    edits: Vec<RowEdit>,
+) -> Result<Vec<ResultSet>, String> {
+    let l = sql(&state, &id).await?;
+    if l.config.read_only {
+        return Err("This connection is read-only".into());
+    }
+    let e = l.engine();
+    let statements = dialect::row_edits(e, owner_schema(e, &database, schema).as_deref(), &table, &edits)?;
+    let session = l.session(&database, META).await?;
+    let mut s = session.lock().await;
+    let (begin, commit, rollback) = if e == Engine::Mssql {
+        ("BEGIN TRANSACTION", "COMMIT TRANSACTION", "ROLLBACK TRANSACTION")
+    } else {
+        ("BEGIN", "COMMIT", "ROLLBACK")
+    };
+    s.run(begin, 0).await?;
+    let mut results = Vec::with_capacity(statements.len());
+    for (i, st) in statements.iter().enumerate() {
+        let outcome = s.run(st, 0).await;
+        let failure = match &outcome {
+            Err(err) => Some(format!("Change {} failed: {err}", i + 1)),
+            // An UPDATE or DELETE that matched nothing means the row was
+            // changed or removed since it was loaded. Saving the rest would
+            // leave the table half-edited, so nothing is saved.
+            Ok(rs) if rs.rows_affected == Some(0) && !matches!(edits[i], RowEdit::Insert { .. }) => Some(format!(
+                "Change {} matched no row; someone else changed or removed it since it was loaded",
+                i + 1
+            )),
+            Ok(_) => None,
+        };
+        if let Some(msg) = failure {
+            let _ = s.run(rollback, 0).await;
+            return Err(format!("{msg}. Nothing was saved."));
+        }
+        results.push(outcome?);
+    }
+    s.run(commit, 0).await?;
+    Ok(results)
+}
+
+// ---------------------------------------------------------------------------
+// Designer
+
+#[tauri::command]
+pub fn db_preview_design(engine: Engine, old: Option<TableDesign>, new: TableDesign) -> Result<DdlPlan, String> {
+    devops::require(Tool::Databases)?;
+    match old {
+        Some(o) => design::alter_table(engine, &o, &new),
+        None => design::create_table(engine, &new),
+    }
+}
+
+#[tauri::command]
+pub async fn db_apply_design(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    old: Option<TableDesign>,
+    new: TableDesign,
+) -> Result<TableDesign, String> {
+    let l = sql(&state, &id).await?;
+    if l.config.read_only {
+        return Err("This connection is read-only".into());
+    }
+    let e = l.engine();
+    // MySQL names its databases where others name schemas; a table made in
+    // one is qualified with it, so it lands there and can be read back.
+    let mut new = new;
+    if e.is_mysql_family() && new.schema.is_none() {
+        new.schema = Some(database.clone());
+    }
+    let plan = match &old {
+        Some(o) => design::alter_table(e, o, &new)?,
+        None => design::create_table(e, &new)?,
+    };
+    let session = l.session(&database, META).await?;
+    let mut s = session.lock().await;
+    if plan.transactional {
+        s.run_in_transaction(e, &plan.statements).await?;
+    } else {
+        for (i, st) in plan.statements.iter().enumerate() {
+            if let Err(err) = s.run(st, 0).await {
+                if e == Engine::Sqlite {
+                    let _ = s.run("ROLLBACK", 0).await;
+                    let _ = s.run("PRAGMA foreign_keys = ON", 0).await;
+                    return Err(format!("Step {} failed and the table was left as it was: {err}", i + 1));
+                }
+                return Err(format!(
+                    "Step {} of {} failed: {err}. MySQL applies each step on its own, so the ones before it are in place; reopen the table to see where it stands.",
+                    i + 1,
+                    plan.statements.len()
+                ));
+            }
+        }
+    }
+    introspect::table(e, &mut s, new.schema.as_deref(), &new.name).await
+}
+
+// ---------------------------------------------------------------------------
+// Server
+
+#[tauri::command]
+pub async fn db_server_info(state: State<'_, AppState>, id: String, database: String) -> Result<ServerInfo, String> {
+    let l = sql(&state, &id).await?;
+    let session = l.session(&database, META).await?;
+    let mut s = session.lock().await;
+    introspect::server_info(l.engine(), &mut s).await
+}
+
+#[tauri::command]
+pub async fn db_sessions(state: State<'_, AppState>, id: String) -> Result<Vec<ServerSession>, String> {
+    let l = sql(&state, &id).await?;
+    let own = l.own_server_ids().await;
+    let session = l.session(&l.default_database(), "__monitor__").await?;
+    let mut s = session.lock().await;
+    introspect::sessions(l.engine(), &mut s, &own).await
+}
+
+#[tauri::command]
+pub async fn db_kill(state: State<'_, AppState>, id: String, server_id: i64, only_query: bool) -> Result<(), String> {
+    let l = sql(&state, &id).await?;
+    let stmt = introspect::kill_sql(l.engine(), server_id, only_query)?;
+    let session = l.session(&l.default_database(), "__monitor__").await?;
+    let mut s = session.lock().await;
+    s.run(&stmt, 1).await.map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// Jobs: backup, restore, import, export
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+enum JobEvent {
+    Progress(Progress),
+    Done(Summary),
+    Failed { message: String },
+}
+
+fn emit(app: &tauri::AppHandle, job: &str, ev: JobEvent) {
+    let _ = app.emit(&format!("db-job-{job}"), ev);
+}
+
+#[tauri::command]
+pub async fn db_cancel_job(state: State<'_, AppState>, job: String) -> Result<(), String> {
+    devops::require(Tool::Databases)?;
+    if let Some(flag) = state.db.lock().await.job(&job) {
+        flag.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn db_backup(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+    options: DumpOptions,
+    path: String,
+) -> Result<String, String> {
+    let l = sql(&state, &id).await?;
+    let job = uuid::Uuid::new_v4().to_string();
+    state.db.lock().await.start_job(&job);
+    let db = state.db.clone();
+    let job_id = job.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let file = std::fs::File::create(&path).map_err(|e| format!("Could not write {path}: {e}"))?;
+            let mut out = BufWriter::new(file);
+            let session = l.session(&database, "__backup__").await?;
+            let mut s = session.lock().await;
+            let e = l.engine();
+            let sch = owner_schema(e, &database, schema);
+            let sch = if e.is_mysql_family() { None } else { sch };
+            backup::dump(e, &mut s, &database, sch.as_deref(), &options, &mut out, |p| emit(&app, &job_id, JobEvent::Progress(p))).await
+        }
+        .await;
+        emit(&app, &job_id, match result {
+            Ok(s) => JobEvent::Done(s),
+            Err(message) => JobEvent::Failed { message },
+        });
+        db.lock().await.end_job(&job_id);
+    });
+    Ok(job)
+}
+
+#[tauri::command]
+pub async fn db_restore(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    path: String,
+    keep_going: bool,
+) -> Result<String, String> {
+    let l = sql(&state, &id).await?;
+    if l.config.read_only {
+        return Err("This connection is read-only".into());
+    }
+    let script = std::fs::read_to_string(&path).map_err(|e| format!("Could not read {path}: {e}"))?;
+    let job = uuid::Uuid::new_v4().to_string();
+    let flag = state.db.lock().await.start_job(&job);
+    let db = state.db.clone();
+    let job_id = job.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let session = l.session(&database, "__restore__").await?;
+            let mut s = session.lock().await;
+            backup::restore(l.engine(), &mut s, &script, keep_going, || flag.load(Ordering::Relaxed), |p| {
+                emit(&app, &job_id, JobEvent::Progress(p))
+            })
+            .await
+        }
+        .await;
+        emit(&app, &job_id, match result {
+            Ok(s) => JobEvent::Done(s),
+            Err(message) => JobEvent::Failed { message },
+        });
+        db.lock().await.end_job(&job_id);
+    });
+    Ok(job)
+}
+
+/// The first rows of a CSV file, for the import mapping screen.
+#[tauri::command]
+pub fn db_csv_preview(path: String, delimiter: char) -> Result<Vec<Vec<String>>, String> {
+    devops::require(Tool::Databases)?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("Could not read {path}: {e}"))?;
+    let mut rows = csv::parse(&text, delimiter)?;
+    rows.truncate(20);
+    Ok(rows)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSpec {
+    pub path: String,
+    pub delimiter: char,
+    pub header: bool,
+    /// For each CSV column, the table column it goes to, or `None` to skip.
+    pub mapping: Vec<Option<String>>,
+    pub empty_as_null: bool,
+}
+
+/// Import a CSV into a table, all or nothing.
+#[tauri::command]
+pub async fn db_import_csv(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+    table: String,
+    spec: ImportSpec,
+) -> Result<String, String> {
+    let l = sql(&state, &id).await?;
+    if l.config.read_only {
+        return Err("This connection is read-only".into());
+    }
+    let text = std::fs::read_to_string(&spec.path).map_err(|e| format!("Could not read {}: {e}", spec.path))?;
+    let mut rows = csv::parse(&text, spec.delimiter)?;
+    if spec.header && !rows.is_empty() {
+        rows.remove(0);
+    }
+    let targets: Vec<(usize, String)> = spec.mapping.iter().enumerate().filter_map(|(i, m)| m.clone().map(|c| (i, c))).collect();
+    if targets.is_empty() {
+        return Err("Map at least one column".into());
+    }
+    let e = l.engine();
+    let t = dialect::qualified(e, owner_schema(e, &database, schema).as_deref(), &table);
+    let cols = targets.iter().map(|(_, c)| dialect::ident(e, c)).collect::<Vec<_>>().join(", ");
+
+    let job = uuid::Uuid::new_v4().to_string();
+    let flag = state.db.lock().await.start_job(&job);
+    let db = state.db.clone();
+    let job_id = job.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let session = l.session(&database, "__import__").await?;
+            let mut s = session.lock().await;
+            let (begin, commit, rollback) = if e == Engine::Mssql {
+                ("BEGIN TRANSACTION", "COMMIT TRANSACTION", "ROLLBACK TRANSACTION")
+            } else {
+                ("BEGIN", "COMMIT", "ROLLBACK")
+            };
+            s.run(begin, 0).await?;
+            let total = rows.len();
+            // SQL Server allows at most 1000 rows per VALUES list.
+            for (n, chunk) in rows.chunks(200).enumerate() {
+                if flag.load(Ordering::Relaxed) {
+                    let _ = s.run(rollback, 0).await;
+                    return Err("Stopped; nothing was imported".to_string());
+                }
+                let values = chunk
+                    .iter()
+                    .map(|r| {
+                        let v = targets
+                            .iter()
+                            .map(|(i, _)| {
+                                let cell = r.get(*i).map(String::as_str).unwrap_or("");
+                                if spec.empty_as_null && cell.is_empty() { "NULL".to_string() } else { dialect::literal(e, Some(cell)) }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("({v})")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if let Err(err) = s.run(&format!("INSERT INTO {t} ({cols}) VALUES {values}"), 0).await {
+                    let _ = s.run(rollback, 0).await;
+                    return Err(format!("Rows {}–{}: {err}. Nothing was imported.", n * 200 + 1, n * 200 + chunk.len()));
+                }
+                emit(&app, &job_id, JobEvent::Progress(Progress { step: "Importing".into(), done: n * 200 + chunk.len(), total, rows: (n * 200 + chunk.len()) as u64 }));
+            }
+            s.run(commit, 0).await?;
+            Ok(Summary { tables: 1, rows: total as u64, statements: total.div_ceil(200), failed: vec![] })
+        }
+        .await;
+        emit(&app, &job_id, match result {
+            Ok(s) => JobEvent::Done(s),
+            Err(message) => JobEvent::Failed { message },
+        });
+        db.lock().await.end_job(&job_id);
+    });
+    Ok(job)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Csv,
+    Json,
+    Sql,
+}
+
+/// Export a whole table (paged) or a query's full result to a file.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn db_export(
+    state: State<'_, AppState>,
+    id: String,
+    database: String,
+    schema: Option<String>,
+    table: Option<String>,
+    query: Option<String>,
+    format: ExportFormat,
+    path: String,
+) -> Result<u64, String> {
+    let l = sql(&state, &id).await?;
+    let e = l.engine();
+    let sch = owner_schema(e, &database, schema);
+    let file = std::fs::File::create(&path).map_err(|err| format!("Could not write {path}: {err}"))?;
+    let mut out = BufWriter::new(file);
+    let io = |err: std::io::Error| err.to_string();
+    let session = l.session(&database, "__export__").await?;
+    let mut s = session.lock().await;
+
+    let target = table.as_deref().map(|t| dialect::qualified(e, sch.as_deref(), t));
+    let sql_name = target.clone().unwrap_or_else(|| dialect::ident(e, "export"));
+    let mut written = 0u64;
+    let mut first = true;
+    let mut offset = 0u64;
+    const PAGE: u64 = 5000;
+
+    if matches!(format, ExportFormat::Json) {
+        out.write_all(b"[\n").map_err(io)?;
+    }
+    loop {
+        let rs = match (&target, &query) {
+            (Some(t), _) => s.run(&dialect::page(e, &format!("SELECT * FROM {t}"), None, PAGE, offset), PAGE as usize).await?,
+            (None, Some(q)) => {
+                let check = guard::analyze(e, q);
+                if check.len() != 1 || check[0].risk != Risk::Read {
+                    return Err("Only a single SELECT can be exported".into());
+                }
+                s.run(q, 5_000_000).await?
+            }
+            (None, None) => return Err("Nothing to export".into()),
+        };
+        if first {
+            if let ExportFormat::Csv = format {
+                let header: Vec<Option<String>> = rs.columns.iter().map(|c| Some(c.name.clone())).collect();
+                out.write_all(csv::line(&header, ',').as_bytes()).map_err(io)?;
+            }
+        }
+        let cols: Vec<String> = rs.columns.iter().map(|c| c.name.clone()).collect();
+        for row in &rs.rows {
+            match format {
+                ExportFormat::Csv => out.write_all(csv::line(row, ',').as_bytes()).map_err(io)?,
+                ExportFormat::Json => {
+                    let obj: serde_json::Map<String, serde_json::Value> = cols
+                        .iter()
+                        .zip(row)
+                        .map(|(c, v)| (c.clone(), v.clone().map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)))
+                        .collect();
+                    if written > 0 {
+                        out.write_all(b",\n").map_err(io)?;
+                    }
+                    out.write_all(b"  ").map_err(io)?;
+                    serde_json::to_writer(&mut out, &obj).map_err(|err| err.to_string())?;
+                }
+                ExportFormat::Sql => {
+                    let names = cols.iter().map(|c| dialect::ident(e, c)).collect::<Vec<_>>().join(", ");
+                    let vals = row.iter().map(|v| dialect::literal(e, v.as_deref())).collect::<Vec<_>>().join(", ");
+                    writeln!(out, "INSERT INTO {sql_name} ({names}) VALUES ({vals});").map_err(io)?;
+                }
+            }
+            written += 1;
+        }
+        first = false;
+        offset += PAGE;
+        if target.is_none() || (rs.rows.len() as u64) < PAGE {
+            break;
+        }
+    }
+    if matches!(format, ExportFormat::Json) {
+        out.write_all(b"\n]\n").map_err(io)?;
+    }
+    out.flush().map_err(io)?;
+    Ok(written)
+}
+
+// ---------------------------------------------------------------------------
+// Finding databases on a terminal tab's machine
+
+async fn probe_port(handle: Option<&SharedHandle>, host: &str, port: u16) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let timeout = std::time::Duration::from_millis(1500);
+    let mut greeting = vec![0u8; 256];
+    match handle {
+        Some(h) => {
+            let channel = {
+                let guard = h.lock().await;
+                tokio::time::timeout(timeout, guard.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)).await.ok()?.ok()?
+            };
+            let mut stream = channel.into_stream();
+            let n = tokio::time::timeout(std::time::Duration::from_millis(400), stream.read(&mut greeting)).await.ok().and_then(Result::ok).unwrap_or(0);
+            greeting.truncate(n);
+            Some(greeting)
+        }
+        None => {
+            let mut tcp = tokio::time::timeout(std::time::Duration::from_millis(300), tokio::net::TcpStream::connect((host, port))).await.ok()?.ok()?;
+            let n = tokio::time::timeout(std::time::Duration::from_millis(300), tcp.read(&mut greeting)).await.ok().and_then(Result::ok).unwrap_or(0);
+            greeting.truncate(n);
+            Some(greeting)
+        }
+    }
+}
+
+/// Databases on the machine behind a terminal tab (`connection_id`), or on
+/// this device when there is none.
+#[tauri::command]
+pub async fn db_detect(state: State<'_, AppState>, connection_id: Option<String>) -> Result<Vec<Detected>, String> {
+    devops::require(Tool::Databases)?;
+    let handle = match &connection_id {
+        Some(id) => Some(state.ssh_manager.lock().await.get_handle(id).map_err(|_| "That tab is not connected".to_string())?),
+        None => None,
+    };
+    let mut found = match &handle {
+        Some(h) => crate::ssh::client::exec_on_connection(h, detect::PROBE_SCRIPT)
+            .await
+            .map(|out| detect::parse_probe(&out))
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    // Try the usual ports for anything the listing could not see.
+    for (port, engine) in detect::WELL_KNOWN {
+        if found.iter().any(|d| d.port == port) {
+            continue;
+        }
+        if let Some(greeting) = probe_port(handle.as_ref(), "127.0.0.1", port).await {
+            let engine = if engine.is_mysql_family() { detect::refine_mysql(&greeting) } else { engine };
+            found.push(Detected { engine, host: "127.0.0.1".into(), port, label: None });
+        }
+    }
+    // MySQL seen by `ss` alone may really be MariaDB; its greeting says.
+    for d in found.iter_mut().filter(|d| d.engine == Engine::Mysql && d.label.as_deref().is_none_or(|l| !l.contains("maria"))) {
+        if let Some(g) = probe_port(handle.as_ref(), &d.host, d.port).await {
+            d.engine = detect::refine_mysql(&g);
+        }
+    }
+    Ok(found)
+}
+
+// ---------------------------------------------------------------------------
+// Redis
+
+async fn redis(state: &State<'_, AppState>, id: &str) -> Result<Arc<LiveRedis>, String> {
+    devops::require(Tool::Databases)?;
+    state.db.lock().await.redis(id)
+}
+
+#[tauri::command]
+pub async fn db_redis_databases(state: State<'_, AppState>, id: String) -> Result<Vec<(i64, i64)>, String> {
+    redis(&state, &id).await?.databases().await
+}
+
+#[tauri::command]
+pub async fn db_redis_scan(
+    state: State<'_, AppState>,
+    id: String,
+    db: i64,
+    pattern: String,
+    cursor: String,
+    count: usize,
+) -> Result<ScanPage, String> {
+    redis(&state, &id).await?.scan(db, &pattern, &cursor, count.clamp(10, 2000)).await
+}
+
+#[tauri::command]
+pub async fn db_redis_get(state: State<'_, AppState>, id: String, db: i64, key: String) -> Result<KeyValue, String> {
+    redis(&state, &id).await?.get(db, &key).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
+pub enum RedisOutcome {
+    Confirm { reason: String },
+    Done { reply: Reply },
+}
+
+/// Run a command given either as a console line or as ready arguments (the
+/// value editors send arguments, so a value with spaces needs no quoting).
+#[tauri::command]
+pub async fn db_redis_command(
+    state: State<'_, AppState>,
+    id: String,
+    db: i64,
+    line: Option<String>,
+    args: Option<Vec<String>>,
+    confirmed: bool,
+) -> Result<RedisOutcome, String> {
+    let r = redis(&state, &id).await?;
+    let args = match (args, line) {
+        (Some(a), _) => a,
+        (None, Some(l)) => rds::split_args(&l)?,
+        (None, None) => return Err("Type a command".into()),
+    };
+    let risk = rds::classify(&args);
+    if r.config.read_only && !matches!(risk, Risk::Read) {
+        return Err("This connection is read-only".into());
+    }
+    if !confirmed {
+        let hold = match &risk {
+            Risk::Danger(reason) => Some(reason.clone()),
+            Risk::Write if r.config.production => Some("This is a production connection".into()),
+            _ => None,
+        };
+        if let Some(reason) = hold {
+            return Ok(RedisOutcome::Confirm { reason });
+        }
+    }
+    Ok(RedisOutcome::Done { reply: r.command(db, &args).await? })
+}
+
+/// Redis INFO: each section's name with its key/value pairs.
+type RedisInfo = Vec<(String, Vec<(String, String)>)>;
+
+#[tauri::command]
+pub async fn db_redis_info(state: State<'_, AppState>, id: String) -> Result<RedisInfo, String> {
+    redis(&state, &id).await?.info().await
+}
+
+#[tauri::command]
+pub async fn db_redis_clients(state: State<'_, AppState>, id: String) -> Result<Vec<std::collections::HashMap<String, String>>, String> {
+    redis(&state, &id).await?.clients().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::types::TlsMode;
+
+    fn conn(read_only: bool, production: bool) -> DbConnection {
+        DbConnection {
+            id: "c".into(), name: "c".into(), engine: Engine::Postgres, host: String::new(), port: 0,
+            username: String::new(), password: None, password_ref: None, route_approval: None, route_context: None, database: None, file_path: None, route: Route::Direct,
+            tls: TlsMode::Prefer, color: None, read_only, production, last_used_at: 0,
+        }
+    }
+
+    #[test]
+    fn read_only_refuses_writes_but_allows_reads_and_transactions() {
+        let st = guard::analyze(Engine::Postgres, "begin; select 1; update t set a = 1 where b = 2");
+        assert!(gate(&conn(true, false), &st, true).is_err());
+        let reads = guard::analyze(Engine::Postgres, "begin; select 1; commit");
+        assert!(gate(&conn(true, false), &reads, false).unwrap().is_none());
+    }
+
+    #[test]
+    fn danger_is_held_back_until_confirmed() {
+        let st = guard::analyze(Engine::Postgres, "select 1; drop table t");
+        let held = gate(&conn(false, false), &st, false).unwrap().unwrap();
+        assert_eq!(held.len(), 1);
+        assert!(gate(&conn(false, false), &st, true).unwrap().is_none());
+    }
+
+    // --- A password manager entry through a saved session -----------------
+
+    const ALICE: [u8; 32] = [7; 32];
+    const MALLORY: [u8; 32] = [9; 32];
+
+    fn route_session(kind: &str) -> crate::state::SessionConfig {
+        serde_json::from_value(serde_json::json!({
+            "id": "s-ssh", "name": "bastion", "host": "bastion.example", "port": 22, "username": "u",
+            "auth_method": { "type": "Agent" }, "folder_id": null, "tags": [], "kind": kind,
+        }))
+        .unwrap()
+    }
+
+    fn through_session() -> DbConnection {
+        DbConnection {
+            password_ref: Some(crate::pwmanager::SecretRef { provider: "passbolt".into(), entry_id: "e-db".into(), ..Default::default() }),
+            route: Route::Session { session_id: "s-ssh".into() },
+            ..conn(false, false)
+        }
+    }
+
+    /// Saved by alice with the route session as `s` is.
+    fn saved_by_alice(s: &crate::state::SessionConfig) -> DbConnection {
+        let mut c = through_session();
+        let (r, _) = ref_through_session(&c).unwrap();
+        c.route_approval = Some(sign_route(&ALICE, "alice", &c.id, r, s));
+        c
+    }
+
+    fn check(c: &DbConnection, s: &crate::state::SessionConfig) -> Result<(), String> {
+        check_route_approval(Some(&ALICE), Some("alice"), c, c.password_ref.as_ref().unwrap(), s)
+    }
+
+    #[test]
+    fn the_form_must_have_shown_the_route_session_as_it_is() {
+        let s = route_session("ssh");
+        let shown = |s: &crate::state::SessionConfig| DbConnection {
+            route_context: Some(crate::ipc::session_commands::approval_context(s)),
+            ..through_session()
+        };
+        assert_eq!(check_route_shown(&shown(&s), &s), Ok(()));
+        // Picked by name only: nothing was shown.
+        assert_eq!(check_route_shown(&through_session(), &s), Err(ROUTE_UNCONFIRMED.to_string()));
+        // Another member re-points the session after the editor showed it.
+        let shown_before = shown(&s);
+        let mut moved = s.clone();
+        moved.host = "mallory.example".into();
+        assert_eq!(check_route_shown(&shown_before, &moved), Err(ROUTE_UNCONFIRMED.to_string()));
+        let mut jumped = s.clone();
+        jumped.jump_chain = serde_json::from_value(serde_json::json!([{ "host": "j.mallory.example", "port": 22, "username": "m", "auth_method": { "type": "Agent" } }])).unwrap();
+        assert_eq!(check_route_shown(&shown_before, &jumped), Err(ROUTE_UNCONFIRMED.to_string()));
+        // What the form sends is never stored with the connection.
+        let stored = serde_json::to_value(shown(&s)).unwrap();
+        assert!(stored.get("routeContext").is_none());
+    }
+
+    #[test]
+    fn a_saved_route_approval_holds_for_the_session_as_saved() {
+        let s = route_session("ssh");
+        let c = saved_by_alice(&s);
+        assert_eq!(check(&c, &s), Ok(()));
+        // A name or a password on the session changes nothing.
+        let mut renamed = s.clone();
+        renamed.name = "bastion (prod)".into();
+        renamed.auth_method = crate::state::AuthMethod::Password { password: Some("pw".into()), password_ref: None };
+        assert_eq!(check(&c, &renamed), Ok(()));
+        // Never stored in the view the webview gets.
+        assert!(DbConnectionView::from(&c).connection.route_approval.is_none());
+    }
+
+    #[test]
+    fn a_re_pointed_route_session_is_refused() {
+        let s = route_session("ssh");
+        let c = saved_by_alice(&s);
+        type Change = Box<dyn Fn(&mut crate::state::SessionConfig)>;
+        let changes: Vec<(&str, Change)> = vec![
+            ("host", Box::new(|s| s.host = "attacker.example".into())),
+            ("port", Box::new(|s| s.port = 2222)),
+            ("user", Box::new(|s| s.username = "other".into())),
+            ("jump", Box::new(|s| {
+                s.jump_chain = Some(vec![crate::state::JumpHostConfig {
+                    host: "attacker.example".into(),
+                    port: 22,
+                    username: "j".into(),
+                    auth_method: crate::state::AuthMethod::Agent,
+                }])
+            })),
+            ("proxy", Box::new(|s| {
+                s.proxy = Some(serde_json::from_value(serde_json::json!({ "proxy_type": "socks5", "host": "attacker.example", "port": 1080 })).unwrap())
+            })),
+            ("ssh_config", Box::new(|s| {
+                s.ssh_options = Some(serde_json::from_value(serde_json::json!({ "lines": ["HostName attacker.example"] })).unwrap())
+            })),
+        ];
+        for (what, change) in changes {
+            let mut moved = s.clone();
+            change(&mut moved);
+            assert_eq!(check(&c, &moved), Err(ROUTE_CHANGED.to_string()), "{what} kept the approval");
+        }
+        // Saving again (the user's word, for the session as it now is)
+        // re-signs it.
+        let mut moved = s.clone();
+        moved.host = "new.example".into();
+        assert_eq!(check(&saved_by_alice(&moved), &moved), Ok(()));
+    }
+
+    #[test]
+    fn only_the_users_own_route_approval_counts() {
+        let s = route_session("ssh");
+        // None at all (saved before this existed, or copied in without one).
+        assert!(check(&through_session(), &s).is_err());
+        // Mallory signs one in alice's name with her own key.
+        let mut forged = through_session();
+        forged.route_approval = Some(sign_route(&MALLORY, "alice", &forged.id, forged.password_ref.as_ref().unwrap(), &s));
+        assert!(check(&forged, &s).is_err());
+        // Alice's signature for another connection, or another entry.
+        let c = saved_by_alice(&s);
+        let other = DbConnection { id: "other".into(), ..c.clone() };
+        assert!(check(&other, &s).is_err());
+        let mut swapped = c.clone();
+        swapped.password_ref.as_mut().unwrap().entry_id = "e-victim".into();
+        assert!(check(&swapped, &s).is_err());
+        // Without the user's key nothing holds.
+        assert!(check_route_approval(None, Some("alice"), &c, c.password_ref.as_ref().unwrap(), &s).is_err());
+    }
+
+    #[test]
+    fn only_a_password_manager_entry_through_a_session_needs_one() {
+        assert!(ref_through_session(&through_session()).is_some());
+        let direct = DbConnection { route: Route::Direct, ..through_session() };
+        assert!(ref_through_session(&direct).is_none());
+        let live = DbConnection { route: Route::Live { connection_id: "c1".into() }, ..through_session() };
+        assert!(ref_through_session(&live).is_none());
+        let typed = DbConnection { password_ref: None, password: Some("pw".into()), ..through_session() };
+        assert!(ref_through_session(&typed).is_none());
+    }
+
+    #[test]
+    fn only_an_ssh_session_carries_a_route() {
+        assert!(require_ssh_route(&route_session("ssh")).is_ok());
+        assert!(require_ssh_route(&route_session("rdp")).is_err());
+        assert!(require_ssh_route(&route_session("vnc")).is_err());
+    }
+
+    #[test]
+    fn production_holds_back_every_write() {
+        let st = guard::analyze(Engine::Postgres, "update t set a = 1 where id = 2");
+        assert!(gate(&conn(false, false), &st, false).unwrap().is_none());
+        assert_eq!(gate(&conn(false, true), &st, false).unwrap().unwrap().len(), 1);
+    }
+}

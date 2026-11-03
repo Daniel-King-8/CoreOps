@@ -1,0 +1,104 @@
+== example.com
+# Host example.com found: line 3 
+example.com ED25519 SHA256:NBqJO3ad9bU5KIVqbUHHsOGm2+DqDDiIqxFJOrgWZRk first comment
+# Host example.com found: line 7 REVOKED
+example.com ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== 192.0.2.1
+# Host 192.0.2.1 found: line 3 
+192.0.2.1 ED25519 SHA256:NBqJO3ad9bU5KIVqbUHHsOGm2+DqDDiIqxFJOrgWZRk first comment
+# Host 192.0.2.1 found: line 7 REVOKED
+192.0.2.1 ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== [example.com]:2222
+# Host [example.com]:2222 found: line 4 
+[example.com]:2222 ECDSA SHA256:wvOF0JpAoHa7Qw296gE5do1I8XJsRrxv8k0ET1NyMSU
+# Host [example.com]:2222 found: line 7 REVOKED
+[example.com]:2222 ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== a.wild.test
+# Host a.wild.test found: line 5 
+a.wild.test RSA SHA256:HQMJb8E5kL56CbHkt4TzOPHxZ5zkEkepZ518IgRTDsg
+# Host a.wild.test found: line 7 REVOKED
+a.wild.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== bad.wild.test
+# Host bad.wild.test found: line 7 REVOKED
+bad.wild.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== x.ca.test
+# Host x.ca.test found: line 6 CA
+x.ca.test ED25519 SHA256:sN8omCr+pNjMleaIOe+F5VO1PVjA58v79iIOlV6EypQ
+# Host x.ca.test found: line 7 REVOKED
+x.ca.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== anything.test
+# Host anything.test found: line 7 REVOKED
+anything.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== indented.test
+# Host indented.test found: line 7 REVOKED
+indented.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+# Host indented.test found: line 8 
+indented.test ECDSA SHA256:ehP2PZCI3G63RuOpgnICbRbTk9DErHqHLGc3veXEpQ0 trailing  comment
+== upper.test
+# Host upper.test found: line 7 REVOKED
+upper.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+# Host upper.test found: line 9 
+upper.test ECDSA SHA256:2OuePHYdAqFtCyVYO+rFhy37SGD/LGpy7ihAksMPWzk
+== UPPER.Test
+# Host UPPER.Test found: line 7 REVOKED
+UPPER.Test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+# Host UPPER.Test found: line 9 
+UPPER.Test ECDSA SHA256:2OuePHYdAqFtCyVYO+rFhy37SGD/LGpy7ihAksMPWzk
+== qa.test
+# Host qa.test found: line 7 REVOKED
+qa.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+# Host qa.test found: line 16 
+qa.test ED25519 SHA256:NBqJO3ad9bU5KIVqbUHHsOGm2+DqDDiIqxFJOrgWZRk
+== qab.test
+# Host qab.test found: line 7 REVOKED
+qab.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== nospace.test
+# Host nospace.test found: line 7 REVOKED
+nospace.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+# Host nospace.test found: line 19 REVOKED
+nospace.test ED25519 SHA256:NBqJO3ad9bU5KIVqbUHHsOGm2+DqDDiIqxFJOrgWZRk
+== tab.test
+# Host tab.test found: line 7 REVOKED
+tab.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== dup.test
+# Host dup.test found: line 7 REVOKED
+dup.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+# Host dup.test found: line 20 
+dup.test ED25519 SHA256:NBqJO3ad9bU5KIVqbUHHsOGm2+DqDDiIqxFJOrgWZRk
+# Host dup.test found: line 21 
+dup.test RSA SHA256:HQMJb8E5kL56CbHkt4TzOPHxZ5zkEkepZ518IgRTDsg
+== alias.test
+# Host alias.test found: line 7 REVOKED
+alias.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+# Host alias.test found: line 22 
+alias.test RSA SHA256:HQMJb8E5kL56CbHkt4TzOPHxZ5zkEkepZ518IgRTDsg
+== crlf.test
+# Host crlf.test found: line 7 REVOKED
+crlf.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+# Host crlf.test found: line 23 
+crlf.test ED25519 SHA256:NBqJO3ad9bU5KIVqbUHHsOGm2+DqDDiIqxFJOrgWZRk
+== neg.test
+# Host neg.test found: line 7 REVOKED
+neg.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== trunc.test
+# Host trunc.test found: line 7 REVOKED
+trunc.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== mismatch.test
+# Host mismatch.test found: line 7 REVOKED
+mismatch.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== small.test
+# Host small.test found: line 7 REVOKED
+small.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+# Host small.test found: line 26 
+small.test RSA SHA256:qqbvv/ZO/nDdU5/W1XtmkgSzfK3FlC+mcbbIL+Eqqps
+== sk.test
+# Host sk.test found: line 7 REVOKED
+sk.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+# Host sk.test found: line 28 
+sk.test ED25519-SK SHA256:DFjugw6BlmQNQDa0CqsfD+tcuvhVnzlnqCi0CdVZyMk
+== two.test
+# Host two.test found: line 7 REVOKED
+two.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs
+== host.test
+# Host host.test found: line 7 REVOKED
+host.test ED25519 SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs

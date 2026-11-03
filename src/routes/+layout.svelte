@@ -1,0 +1,175 @@
+<script lang="ts">
+	import { applyTheme, themeState, loadInstalledThemes, DARK, LIGHT } from '#lib/state/theme.svelte.js';
+	import type { Snippet } from 'svelte';
+	import '../app.css';
+	import AppShell from '#lib/components/layout/AppShell.svelte';
+	import WelcomeScreen from '#lib/components/setup/WelcomeScreen.svelte';
+	import CommunityPrompt from '#lib/components/shared/CommunityPrompt.svelte';
+	import LockScreen from '#lib/components/shared/LockScreen.svelte';
+	import CommandPalette from '#lib/components/shared/CommandPalette.svelte';
+	import AskHost from '#lib/components/shared/AskHost.svelte';
+	import PasswordPrompt from '#lib/components/shared/PasswordPrompt.svelte';
+	import { applyUiZoom } from '#lib/state/ui-zoom.js';
+	import { startAutoLock } from '#lib/state/autolock.svelte.js';
+	import { loadSettings, getSettings, syncTraySettings, recordLaunch, markFeaturesSeen } from '#lib/state/settings.svelte.js';
+	import { addToast } from '#lib/state/toasts.svelte.js';
+	import { syncDevopsTools } from '#lib/state/devops.svelte.js';
+	import { loadAISettings, loadSecureAISettings } from '#lib/state/ai.svelte.js';
+	import { initShortcuts, cleanupShortcuts } from '#lib/state/shortcuts.svelte.js';
+	import { startupUpdateCheck, startPeriodicChecks, stopPeriodicChecks } from '#lib/state/updater.svelte.js';
+	import { changeLocale, t } from '#lib/state/i18n.svelte.js';
+	import { loadSnippets } from '#lib/state/snippets.svelte.js';
+	import { vaultState } from '#lib/state/vault.svelte.js';
+	import * as mcp from '#lib/state/mcp.svelte.js';
+	import * as share from '#lib/state/share.svelte.js';
+	import { installSelectMenus } from '#lib/utils/selectMenu.js';
+	import { initScreenEdges } from '#lib/edges.js';
+	import { onMount } from 'svelte';
+
+	let { children }: { children: Snippet } = $props();
+
+	const isEditorWindow = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('editor');
+	const settings = getSettings();
+
+	// Compact layout (Settings > Appearance): one class on the page that the
+	// rows read, so it applies the moment it is switched.
+	$effect(() => {
+		document.documentElement.classList.toggle('compact', settings.compactLayout);
+	});
+
+	onMount(() => {
+		loadSettings();
+		// The interface size chosen last time, before anything is laid out.
+		applyUiZoom();
+		startAutoLock();
+		// After loadSettings, or the count read back as zero and reset itself
+		// every launch, which would hold the community prompt off forever.
+		recordLaunch();
+		// Before the theme effect below resolves settings.themeId: until these
+		// are in, themeState.all is just the two built-ins, so an installed
+		// theme silently fell back to dark/light on every launch.
+		loadInstalledThemes();
+		syncTraySettings();
+		syncDevopsTools();
+		// Someone updating has not met the DevOps switches; say once where
+		// Databases lives. A fresh install is seeded with 'devops' as seen.
+		if (settings.setupComplete && !settings.seenFeatures.includes('devops') && !settings.seenFeatures.includes('devops-notice')) {
+			// After the locale has loaded and the window has painted.
+			setTimeout(() => addToast(t('devops.new_notice'), 'info', 12000), 2500);
+			markFeaturesSeen(['devops-notice']);
+		}
+		// The same, once, for Containers and Kubernetes (0.7.4).
+		if (settings.setupComplete && !settings.seenFeatures.includes('containers-k8s') && !settings.seenFeatures.includes('containers-k8s-notice')) {
+			setTimeout(() => addToast(t('devops.containers_k8s_notice'), 'info', 12000), 3500);
+			markFeaturesSeen(['containers-k8s-notice']);
+		}
+		loadAISettings();
+		initShortcuts();
+		// Every <select> opens a theme-drawn list, not the platform popup (#110).
+		const stopSelectMenus = installSelectMenus();
+		// Android's status bar, navigation bar and camera cutout, for --safe-*.
+		initScreenEdges();
+		startupUpdateCheck();
+		startPeriodicChecks();
+
+		// The Svelte app has loaded and mounted — signal real readiness. The
+		// preloader listener in app.html reacts to this (no timer, no fake delay).
+		window.dispatchEvent(new CustomEvent('app-ready'));
+
+		return () => {
+			cleanupShortcuts();
+			stopSelectMenus();
+			stopPeriodicChecks();
+		};
+	});
+
+	$effect(() => {
+		changeLocale(settings.locale);
+	});
+
+	// Load snippets once vault is unlocked
+	$effect(() => {
+		if (!vaultState.locked) {
+			loadSnippets();
+		}
+	});
+
+	// The AI API key lives in the vault, so it can only be read once the vault
+	// is unlocked. Loading it here (rather than only in Settings → AI) is what
+	// keeps the assistant configured across restarts; the keychain attempt can
+	// also land before the vault opens, so the effect must rerun on unlock.
+	$effect(() => {
+		if (!vaultState.locked) {
+			loadSecureAISettings();
+		}
+	});
+
+	// MCP settings live in the vault, so they can only be restored once it is
+	// open — reading them at process start would silently find nothing. This
+	// restores the agent, mode and port, and restarts the server if it was
+	// explicitly enabled before. Sharing is never restored: bringing the
+	// server back honours a decision the user made, whereas bringing a shared
+	// session back would be making one for them.
+	let mcpRestored = false;
+	$effect(() => {
+		if (!vaultState.locked && !mcpRestored) {
+			mcpRestored = true;
+			mcp.restore();
+			// Same reason: the switch and the ICE list live in the vault.
+			share.load();
+		}
+	});
+
+	$effect(() => {
+		document.documentElement.style.setProperty('--app-font-size', `${settings.fontSize}px`);
+	});
+
+	// Fonts are local/system only — no Google Fonts network fetch. The terminal
+	// font resolves from what the OS has installed (JetBrains Mono is bundled
+	// via app.css @font-face), falling back to `monospace`.
+
+	// Resolve the setting to an actual theme and apply it. Previously this only
+	// toggled a class, so the palette lived in two places (CSS for the app,
+	// hardcoded JS for the terminal) and could not be extended past two options.
+	$effect(() => {
+		const setting = settings.theme;
+		const themeId = settings.themeId;
+
+		// An installed theme wins; otherwise fall back to the light/dark/system
+		// setting so existing preferences keep working.
+		const chosen = themeId ? themeState.all.find((t) => t.id === themeId) : undefined;
+		if (chosen) {
+			applyTheme(chosen);
+			return;
+		}
+
+		if (setting === 'system') {
+			const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+			applyTheme(prefersDark ? DARK : LIGHT);
+		} else {
+			applyTheme(setting === 'light' ? LIGHT : DARK);
+		}
+	});
+</script>
+
+{#if isEditorWindow}
+	{@render children()}
+{:else}
+	{#if !settings.setupComplete}
+		<WelcomeScreen />
+	{/if}
+
+	<AppShell>
+		{@render children()}
+	</AppShell>
+
+	<!-- Below the welcome screen's stacking order on purpose: a first-run user
+	     is setting the app up, and must never meet this on top of that. -->
+	{#if settings.setupComplete}
+		<CommandPalette />
+		<CommunityPrompt />
+		<PasswordPrompt />
+		<AskHost />
+		<LockScreen />
+	{/if}
+{/if}

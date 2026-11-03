@@ -1,0 +1,485 @@
+@import 'tailwindcss';
+
+/* The parts of a phone's screen the system draws over: status bar, camera
+   cutout, navigation or gesture bar. The WebView reports the cutout alone
+   (env), so Android tells the page about the rest (--edge-*, set by
+   lib/edges.ts); whichever is larger is kept clear. 0 on a desktop. */
+:root {
+  --safe-top: max(env(safe-area-inset-top), var(--edge-top, 0px));
+  --safe-right: max(env(safe-area-inset-right), var(--edge-right, 0px));
+  --safe-bottom: max(env(safe-area-inset-bottom), var(--edge-bottom, 0px));
+  --safe-left: max(env(safe-area-inset-left), var(--edge-left, 0px));
+}
+
+/* ─── Reach Design Tokens ─── */
+
+@theme {
+  /* Dark mode colors (default) */
+  --color-bg-primary: #0a0a0a;
+  --color-bg-secondary: #141414;
+  --color-bg-elevated: #1c1c1e;
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-text-primary: #f5f5f7;
+  --color-text-secondary: #86868b;
+  --color-accent: #0a84ff;
+  --color-accent-hover: #409cff;
+  --color-success: #30d158;
+  --color-warning: #ffd60a;
+  --color-danger: #ff453a;
+
+  /* Surfaces — components previously hardcoded rgba(255,255,255,x) overlays for
+     these, which are invisible against a white background in light mode. */
+  --color-surface-hover: rgba(255, 255, 255, 0.06);
+  --color-surface-active: rgba(255, 255, 255, 0.10);
+  --color-surface-sunken: rgba(0, 0, 0, 0.20);
+  --color-surface-strong: rgba(255, 255, 255, 0.18);
+
+  /* A third text level. Two were not enough, so components reached for opacity
+     or ad-hoc greys to express "less important than secondary". */
+  --color-text-tertiary: #6e6e73;
+
+  /* Type scale. The old floor was 9px with 11px body, which is not readable for
+     a tool people keep open all day. 11px is now the smallest permitted size and
+     is reserved for badges; 13px is the default. */
+  --text-2xs: 0.6875rem;  /* 11px — badges, uppercase labels */
+  --text-xs: 0.75rem;     /* 12px — meta, secondary lines */
+  --text-sm: 0.8125rem;   /* 13px — default body */
+  --text-md: 0.875rem;    /* 14px — emphasis, list primaries */
+  --text-lg: 1rem;        /* 16px — section titles */
+  --text-xl: 1.25rem;     /* 20px — page titles */
+
+  /* Spacing scale on a 4px grid. Replaces the 8+ ad-hoc padding values that made
+     spacing differ from panel to panel. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-btn: 8px;
+  --radius-card: 12px;
+  --radius-modal: 16px;
+
+  /* Shadows */
+  --shadow-subtle: 0 2px 8px rgba(0, 0, 0, 0.15);
+  --shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.25);
+
+  /* Fonts */
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace;
+
+  /* Transitions */
+  --ease-default: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --duration-default: 200ms;
+}
+
+/* ─── Base Styles ─── */
+
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/JetBrainsMono-Variable.woff2') format('woff2');
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+html {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* Even line lengths in headings, and no word left alone on a paragraph's
+   last line ("protect / it."). Engines without these ignore them. */
+h1,
+h2,
+h3,
+h4 {
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+/* Native controls, scrollbars and select fields drawn dark or light to match
+   the theme; without it the engine draws them light under a dark theme. */
+.dark {
+  color-scheme: dark;
+}
+
+.light {
+  color-scheme: light;
+}
+
+/* Dark mode (default) */
+.dark body {
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+}
+
+/* Light mode overrides */
+.light body {
+  background-color: #ffffff;
+  color: #1d1d1f;
+}
+
+.light {
+  --color-bg-primary: #ffffff;
+  --color-bg-secondary: #f5f5f7;
+  --color-bg-elevated: #ffffff;
+  --color-border: rgba(0, 0, 0, 0.06);
+  --color-text-primary: #1d1d1f;
+  --color-text-secondary: #86868b;
+  --color-accent: #007aff;
+  --color-accent-hover: #0071e3;
+  --color-success: #34c759;
+  --color-warning: #ff9f0a;
+  --color-danger: #ff3b30;
+  --shadow-subtle: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.12);
+  --color-surface-hover: rgba(0, 0, 0, 0.04);
+  --color-surface-active: rgba(0, 0, 0, 0.08);
+  --color-surface-sunken: rgba(0, 0, 0, 0.03);
+  --color-surface-strong: rgba(0, 0, 0, 0.16);
+  --color-text-tertiary: #8e8e93;
+}
+
+/* ─── Select menus ─── */
+
+/* The field itself: WebKitGTK paints a native select as a GTK button and drops
+   the background it is given, so it is drawn plainly with its own chevron.
+   The chevron's properties win over a component's `background` shorthand,
+   which would otherwise reset the image. */
+select:not([multiple]) {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='%2386868b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 10px center !important;
+  background-size: 10px 6px !important;
+  padding-right: 28px !important;
+  cursor: pointer;
+}
+
+select:not([multiple]):disabled {
+  cursor: default;
+}
+
+/* The open list of a <select>, drawn by #lib/utils/selectMenu in place of the
+   platform's popup, which no theme can style. */
+.select-menu {
+  position: fixed;
+  z-index: 10001;
+  box-sizing: border-box;
+  padding: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background-color: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-btn);
+  box-shadow: var(--shadow-elevated);
+  user-select: none;
+  animation: select-menu-in 120ms var(--ease-default);
+}
+
+.select-menu-row {
+  position: relative;
+  padding: 6px 28px 6px 10px;
+  border-radius: 4px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+
+.select-menu-row.in-group {
+  padding-left: 20px;
+}
+
+.select-menu-row.active {
+  background-color: var(--color-surface-active);
+}
+
+.select-menu-row.selected {
+  color: var(--color-accent);
+}
+
+/* A tick on the chosen row, as the theme-drawn dropdowns have. */
+.select-menu-row.selected::after {
+  content: '';
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 4px;
+  height: 8px;
+  margin-top: -6px;
+  border: solid var(--color-accent);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+.select-menu-row.disabled {
+  color: var(--color-text-tertiary);
+}
+
+.select-menu-row.group {
+  padding-top: 8px;
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+@media (pointer: coarse) {
+  .select-menu-row {
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+}
+
+@keyframes select-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+
+/* A menu or popover fades in as the select menus do, so every menu in the
+ app opens the same way. */
+.pop-in {
+  animation: select-menu-in 120ms var(--ease-default);
+}
+
+/* Asked for less motion: menus appear, and every transition is instant.
+ Looping animations are left alone here — a spinner says something is
+ still working — and dialogs, the palette and toasts drop their own
+ entrances in their components. */
+@media (prefers-reduced-motion: reduce) {
+  .select-menu,
+  .pop-in {
+    animation: none;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ─── Glass Effect ─── */
+
+.glass {
+  background: rgba(28, 28, 30, 0.72);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* Dimmed, not washed out: a white veil left a white dialog with no edge
+   against what it covers, and the app behind it unreadable as context. */
+.light .glass {
+  background: rgba(15, 18, 24, 0.28);
+}
+
+/* ─── Scrollbar ─── */
+
+/* On tokens, not hardcoded overlays. This was the last of the
+   rgba(255,255,255,x) + `.light` overrides the theme migration replaced
+   everywhere else: an installed theme restyled the whole app and then got
+   Reach's own scrollbar, which is exactly the seam a theme is supposed to
+   remove. --color-surface-strong is the token that exists for this. */
+
+/* Firefox has no ::-webkit pseudo-elements and was left with the default
+   full-width bar; these two properties are all it supports, and all it needs.
+ Only there: since Chromium 121 an element with either property set loses
+ its ::-webkit-scrollbar styling, and WebView2 drew the system scrollbar,
+ arrow buttons and all, in every list and the terminal. */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-surface-strong) transparent;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-surface-strong);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-tertiary);
+}
+
+/* Only paint a corner when both bars are present; the default is an opaque
+   square that reads as a rendering artefact against a themed surface. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ─── Focus Ring ─── */
+
+*:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-btn);
+}
+
+/* ─── Selection ─── */
+
+::selection {
+  background: rgba(10, 132, 255, 0.3);
+}
+
+/* ─── Settings rows ───
+   One definition for every settings tab. The rows used to be copied into
+   each tab with their own padding, label size and control width, which is
+   why nothing lined up from one tab to the next. A row is a two-column
+   grid: the text takes what is left, the control column is a fixed width,
+   and controls sit against its right edge so their edges align down the
+   page whatever their own width. */
+
+.settings-content {
+  --settings-control-width: 200px;
+}
+
+.settings-content .tab-content {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-content .setting-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--settings-control-width);
+  align-items: center;
+  column-gap: 24px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.settings-content .setting-row:last-child {
+  border-bottom: none;
+}
+
+.settings-content .setting-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.settings-content .setting-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.settings-content .setting-description {
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+.settings-content .setting-description.mono {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.6875rem;
+  color: var(--color-text-tertiary);
+}
+
+.settings-content .setting-control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+/* A row whose control is placed directly (a Button, a badge) rather than
+   wrapped in .setting-control still sits against the column's right edge,
+   instead of being stretched across it by the grid. */
+.settings-content .setting-row > :not(.setting-info):not(.setting-control) {
+  justify-self: end;
+}
+
+/* A phone: each setting's text takes the full width, with its control
+   underneath, instead of squeezing the text into a column a word wide. */
+@media (max-width: 640px) {
+  .settings-content .setting-row {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 10px;
+  }
+
+  .settings-content .setting-control {
+    justify-content: flex-start;
+  }
+
+  .settings-content .setting-row > :not(.setting-info):not(.setting-control) {
+    justify-self: start;
+  }
+}
+
+/* Fields fill the column; buttons and toggles keep their size at its edge. */
+.settings-content .setting-control > .dropdown,
+.settings-content .setting-control > .select,
+.settings-content .setting-control > select,
+.settings-content .setting-control > input:not([type="number"]) {
+  width: 100%;
+}
+
+/* A number is a few digits: a field the width of the dropdowns above it read
+   as a text box. */
+.settings-content .setting-control > input[type="number"] {
+  width: 96px;
+}
+
+.settings-content .section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-content .section-title {
+  margin: 0;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+/* A row of buttons under a section sits on the control side, where every
+   other action in the window sits. */
+/* Wraps: kept on one line and right-aligned, a row too wide for a phone ran
+   off the left edge. */
+.settings-content .action-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 4px;
+}

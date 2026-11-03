@@ -1,0 +1,47 @@
+# Vendored from IronRDP at rev bfd16a2e5573d4cd6617dd71b2802b4e7b944a59 with the dependency bump from
+# IronRDP PR #1987: sspi 0.22 and picky 7.0.0-rc.26, whose RustCrypto releases
+# are the ones russh 0.63 needs. Cargo can hold only one of each, so without
+# this the SSH library stays on versions with open advisories. credssp.rs takes
+# the one call sspi 0.22 made fallible (buffer_len). Drop this copy and the [patch] entry in
+# ../../Cargo.toml once IronRDP ships the bump.
+[package]
+name = "ironrdp-connector"
+version = "0.10.0"
+readme = "README.md"
+description = "State machines to drive an RDP connection sequence"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/Devolutions/IronRDP"
+repository = "https://github.com/Devolutions/IronRDP"
+authors = ["Devolutions Inc. <infos@devolutions.net>", "Teleport <goteleport.com>"]
+keywords = ["rdp", "remote-desktop", "network", "client", "protocol"]
+categories = ["network-programming"]
+
+[lib]
+doctest = false
+test = false
+
+[features]
+default = []
+qoi = ["ironrdp-pdu/qoi"]
+qoiz = ["ironrdp-pdu/qoiz"]
+
+[dependencies]
+ironrdp-svc = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59", version = "0.8" } # public
+ironrdp-core = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59", version = "0.2" } # public
+ironrdp-error = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59", version = "0.2" } # public
+ironrdp-pdu = { git = "https://github.com/Devolutions/IronRDP", rev = "bfd16a2e5573d4cd6617dd71b2802b4e7b944a59", version = "0.9", features = ["std"] } # public
+sspi = { version = "0.22", features = ["scard"] } # public
+url = "2.5" # public
+rand = { version = "0.9", features = ["std"] } # TODO: dependency injection?
+tracing = { version = "0.1", features = ["log"] }
+picky-asn1-der = "0.5"
+picky-asn1-x509 = "0.15"
+picky = "=7.0.0-rc.26" # FIXME: We are pinning with = because the candidate version number counts as the minor number by Cargo, and will be automatically bumped in the Cargo.lock.
+
+
+# The workspace lints the #[expect]s in the source were written against are
+# not carried over with this copy.
+[lints.rust]
+unfulfilled_lint_expectations = "allow"

@@ -1,0 +1,194 @@
+---
+/**
+ * Download cards that always point at the current release.
+ *
+ * The asset filenames carry the version, so no fixed URL can name them. They
+ * are resolved in the browser from the GitHub releases API instead of being
+ * baked in at build time, because the docs are rebuilt on documentation
+ * changes and a release does not necessarily cause one — baked links would
+ * quietly rot between builds.
+ *
+ * Everything degrades: the cards render as links to the releases page and are
+ * useful with no JavaScript at all, then upgrade in place once the release is
+ * known. A rate-limited or offline API leaves the page exactly as shipped
+ * rather than empty.
+ */
+
+/** Matched against asset names in order; the first hit wins. */
+const PLATFORMS = [
+	{
+		id: 'windows',
+		name: 'Windows',
+		note: '10 and 11, 64-bit',
+		match: ['_x64-setup.exe'],
+		label: 'Installer (.exe)',
+	},
+	{
+		id: 'macos-arm',
+		name: 'macOS',
+		note: 'Apple silicon',
+		match: ['_aarch64.dmg'],
+		label: 'Disk image (.dmg)',
+	},
+	{
+		id: 'macos-intel',
+		name: 'macOS',
+		note: 'Intel',
+		match: ['_x64.dmg'],
+		label: 'Disk image (.dmg)',
+	},
+	{
+		id: 'linux',
+		name: 'Linux',
+		note: 'Runs anywhere',
+		match: ['_amd64.AppImage'],
+		label: 'AppImage',
+	},
+	{
+		id: 'android',
+		name: 'Android',
+		note: '64-bit ARM, nearly every phone',
+		// Releases before 0.6.9 shipped one universal APK instead.
+		match: ['_android_arm64.apk', '.apk'],
+		label: 'APK',
+	},
+];
+
+/** Secondary formats, shown under the cards for people who want them. */
+const ALSO = [
+	{ id: 'msi', name: 'Windows MSI', match: ['_en-US.msi'] },
+	{ id: 'apk-armv7', name: 'Android, older 32-bit phones', match: ['_android_armv7.apk'] },
+	{ id: 'deb', name: 'Debian / Ubuntu (.deb)', match: ['_amd64.deb'] },
+	{ id: 'rpm', name: 'Fedora / RHEL (.rpm)', match: ['.x86_64.rpm'] },
+];
+
+import { latestRelease, RELEASES_URL, resolve } from '../lib/release';
+
+const releasesUrl = RELEASES_URL;
+const release = await latestRelease();
+const platforms = PLATFORMS.map((p) => ({ ...p, ...resolve(release, p.match) }));
+const also = ALSO.map((p) => ({ ...p, ...resolve(release, p.match) }));
+const version = release?.tag_name ? `Latest release · ${release.tag_name}` : 'Latest release';
+---
+
+<section class="downloads not-content">
+	<p class="downloads-version">
+		<span>{version}</span>
+		<a href={releasesUrl}>All releases and changelog</a>
+	</p>
+
+	<div class="downloads-grid">
+		{
+			platforms.map((p) => (
+				<a class="download-card" href={p.href} data-platform={p.id}>
+					<span class="download-os">{p.name}</span>
+					<span class="download-note">{p.note}</span>
+					<span class="download-file">{p.label}</span>
+					<span class="download-size">{p.size}</span>
+				</a>
+			))
+		}
+	</div>
+
+	<p class="downloads-also">
+		Other formats:
+		{
+			also.map((p, i) => (
+				<>
+					{i > 0 && <span aria-hidden="true"> · </span>}
+					<a href={p.href} data-platform={p.id}>
+						{p.name}
+					</a>
+				</>
+			))
+		}
+	</p>
+</section>
+
+
+<style>
+	.downloads {
+		margin: 2rem 0 3rem;
+	}
+
+	.downloads-version {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.5rem 1rem;
+		align-items: baseline;
+		justify-content: space-between;
+		margin: 0 0 1rem;
+		font-size: 0.9rem;
+		color: var(--sl-color-gray-3);
+	}
+
+	.downloads-version span {
+		font-weight: 600;
+		color: var(--sl-color-gray-2);
+	}
+
+	.downloads-grid {
+		display: grid;
+		gap: 0.85rem;
+		/* Cards keep a sensible width at every size rather than stretching to
+		   one per row on a phone and five on a desktop. */
+		grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+	}
+
+	.download-card {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+		padding: 1.1rem 1.15rem 1rem;
+		border: 1px solid var(--reach-border-soft, #2a2f3a);
+		border-radius: var(--reach-radius, 12px);
+		background: linear-gradient(180deg, hsl(215 22% 13% / 0.5), hsl(215 25% 10% / 0.5));
+		text-decoration: none;
+		color: inherit;
+		transition:
+			transform 0.18s ease,
+			border-color 0.18s ease,
+			box-shadow 0.18s ease;
+	}
+
+	:global(:root[data-theme='light']) .download-card {
+		background: linear-gradient(180deg, hsl(0 0% 100%), hsl(215 30% 99%));
+	}
+
+	.download-card:hover {
+		transform: translateY(-2px);
+		border-color: var(--sl-color-accent);
+		box-shadow: 0 14px 34px -20px var(--reach-glow, rgba(10, 132, 255, 0.14));
+	}
+
+	.download-os {
+		font-size: 1.05rem;
+		font-weight: 640;
+		letter-spacing: -0.01em;
+		color: var(--sl-color-white);
+	}
+
+	.download-note {
+		font-size: 0.8rem;
+		color: var(--sl-color-gray-3);
+	}
+
+	.download-file {
+		margin-top: 0.55rem;
+		font-size: 0.85rem;
+		font-weight: 560;
+		color: var(--sl-color-accent-high);
+	}
+
+	.download-size {
+		font-size: 0.78rem;
+		color: var(--sl-color-gray-3);
+		min-height: 1.1em; /* reserve the line so cards do not jump when filled */
+	}
+
+	.downloads-also {
+		margin-top: 1.25rem;
+		font-size: 0.88rem;
+		color: var(--sl-color-gray-3);
+	}
+</style>

@@ -1,0 +1,17 @@
+[package]
+name = "tauri-plugin-reach-unlock"
+version = "0.1.0"
+description = "Reach's Android side of vault unlock: fingerprint through the Android Keystore, and FIDO2 security keys over USB and NFC"
+edition = "2021"
+license = "MIT"
+publish = false
+# tauri-build finds a plugin's Android library through the DEP_<links>_* variables
+# this name produces, and wires it into the generated Android project.
+links = "tauri-plugin-reach-unlock"
+
+[dependencies]
+tauri = "2"
+serde = "1"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

@@ -1,0 +1,308 @@
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+#[cfg(desktop)]
+use std::sync::Mutex;
+use tokio::sync::RwLock;
+use serde::{Deserialize, Serialize};
+
+use crate::mcp::McpState;
+use crate::monitoring::collector::MonitoringCollector;
+#[cfg(desktop)]
+use crate::pty::manager::PtyManager;
+#[cfg(desktop)]
+use crate::serial::port::SerialManager;
+use crate::rdp::RdpManager;
+use crate::vnc::VncManager;
+use crate::ssh::client::SshManager;
+use crate::ansible::project::AnsibleProjectManager;
+use crate::tofu::project::TofuProjectManager;
+use crate::tofu::types::SchemaCache;
+use crate::tunnel::manager::TunnelManager;
+use crate::vault::VaultManager;
+use crate::plugin::manager::PluginManager;
+
+/// Configuration for a jump host in a ProxyJump chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JumpHostConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_method: AuthMethod,
+}
+
+/// What a saved session connects with. Sessions saved before this existed
+/// have no `kind` on disk and read back as SSH, which is what they were.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionKind {
+    #[default]
+    Ssh,
+    Rdp,
+    Vnc,
+    Wsl,
+}
+
+impl SessionKind {
+    fn is_ssh(&self) -> bool {
+        *self == SessionKind::Ssh
+    }
+}
+
+/// Configuration for a saved session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfig {
+    pub id: String,
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_method: AuthMethod,
+    /// SSH unless said otherwise; omitted from disk when it is SSH so the
+    /// file stays readable by older builds.
+    #[serde(default, skip_serializing_if = "SessionKind::is_ssh")]
+    pub kind: SessionKind,
+    /// Windows logon domain, RDP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// A local folder shown inside the remote desktop as a drive, RDP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_path: Option<String>,
+    /// Key sessions only: offer the SSH agent's keys if this session's own key
+    /// is refused. Off unless the user turned it on; see `build_auth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub try_agent_keys: Option<bool>,
+    /// VNC only: a saved SSH session to reach the server through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_session_id: Option<String>,
+    /// WSL only: distribution name (e.g. "Ubuntu")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wsl_distro: Option<String>,
+    pub folder_id: Option<String>,
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_os: Option<String>,
+    /// Which vault this session belongs to (None = private __sessions__ vault)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_id: Option<String>,
+    /// ProxyJump chain: ordered list of jump hosts to tunnel through
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump_chain: Option<Vec<JumpHostConfig>>,
+    /// Proxy configuration (SOCKS5, SOCKS4, HTTP CONNECT)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyConfig>,
+    /// Optional per-session login shell run instead of the remote default
+    /// (e.g. "fish" or "fish -l"). Also drives shell-aware color init.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    /// ssh_config settings: the files it was imported from, lines set in
+    /// Reach, and the commands and weakenings the user allowed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_options: Option<crate::ssh::sshconf::session::SshOptions>,
+}
+
+/// Proxy configuration for SSH connections (Tor, SOCKS5, HTTP CONNECT).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    /// Proxy type: "socks5", "socks4", "http"
+    pub proxy_type: String,
+    /// Proxy host (e.g. "127.0.0.1" for Tor)
+    pub host: String,
+    /// Proxy port (e.g. 9050 for Tor)
+    pub port: u16,
+    /// Optional proxy username
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Optional proxy password
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// The proxy password from a password manager, fetched at connect time.
+    /// Wins over `password` when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_ref: Option<crate::pwmanager::SecretRef>,
+}
+
+/// Authentication method for an SSH session.
+/// Credentials (password, passphrase, key_content) are stored encrypted in the vault.
+/// A `*_ref` points at a password manager entry instead; it is resolved at
+/// connect time and wins over the plaintext field (see `crate::pwmanager`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AuthMethod {
+    Password {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password_ref: Option<crate::pwmanager::SecretRef>,
+    },
+    Key {
+        /// A key file on this machine. Set when the user browsed to one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passphrase: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_content: Option<String>, // Embedded key for sharing
+        /// A key imported into the vault, referenced by id. Set instead of
+        /// `path` when the user picked an imported key, so the session works
+        /// on a machine that has no copy of the key file (issue #46).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_id: Option<String>,
+        /// The key's passphrase from a password manager.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passphrase_ref: Option<crate::pwmanager::SecretRef>,
+    },
+    Agent,
+}
+
+/// A saved command snippet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snippet {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// A folder used to organize sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_id: Option<String>,
+}
+
+/// Configuration for a port-forwarding tunnel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TunnelConfig {
+    pub id: String,
+    pub tunnel_type: TunnelType,
+    pub local_port: u16,
+    pub remote_host: String,
+    pub remote_port: u16,
+    pub connection_id: String,
+    pub active: bool,
+}
+
+/// The type of SSH tunnel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TunnelType {
+    Local,
+    Remote,
+    Dynamic,
+}
+
+/// System statistics collected from a remote host.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemStats {
+    pub cpu: f64,
+    pub ram: f64,
+    pub ram_total: u64,
+    pub ram_used: u64,
+    pub disk: f64,
+    pub users: Vec<String>,
+    /// Network upload bytes per second
+    #[serde(default)]
+    pub net_up: u64,
+    /// Network download bytes per second
+    #[serde(default)]
+    pub net_down: u64,
+}
+
+/// Main application state.
+///
+/// All collections are behind `Arc<RwLock<_>>` for safe concurrent access
+/// from multiple Tauri command handlers.
+///
+/// Note: Sessions, folders, credentials, and settings are all
+/// stored encrypted in the vault (SQLite + XChaCha20-Poly1305).
+pub struct AppState {
+    pub ssh_manager: Arc<tokio::sync::Mutex<SshManager>>,
+    pub tunnels: Arc<RwLock<HashMap<String, TunnelConfig>>>,
+    pub monitoring: Arc<RwLock<HashMap<String, SystemStats>>>,
+    #[cfg(desktop)]
+    pub pty_manager: Arc<Mutex<PtyManager>>,
+    pub monitoring_collector: Arc<tokio::sync::Mutex<MonitoringCollector>>,
+    pub tunnel_manager: Arc<tokio::sync::Mutex<TunnelManager>>,
+    #[cfg(desktop)]
+    pub serial_manager: Arc<tokio::sync::Mutex<SerialManager>>,
+    pub rdp_manager: Arc<tokio::sync::Mutex<RdpManager>>,
+    pub vnc_manager: Arc<tokio::sync::Mutex<VncManager>>,
+    pub vault_manager: Arc<tokio::sync::Mutex<VaultManager>>,
+    pub plugin_manager: Arc<tokio::sync::Mutex<PluginManager>>,
+    /// URL of the marketplace registry JSON file.
+    pub marketplace_index_url: Arc<RwLock<String>>,
+    pub ansible_project_manager: Arc<tokio::sync::Mutex<AnsibleProjectManager>>,
+    pub tofu_project_manager: Arc<tokio::sync::Mutex<TofuProjectManager>>,
+    pub tofu_schema_cache: Arc<tokio::sync::Mutex<SchemaCache>>,
+    /// Saved and open database connections.
+    pub db: Arc<tokio::sync::Mutex<crate::db::DbManager>>,
+    /// Open container engines (Docker, Podman) and their log streams.
+    pub containers: Arc<tokio::sync::Mutex<crate::container::ContainerManager>>,
+    /// Open Kubernetes clusters and their log streams.
+    pub k8s: Arc<tokio::sync::Mutex<crate::k8s::K8sManager>>,
+    /// Saved container hosts and clusters, from the `__devops__` vault.
+    pub devops_store: Arc<tokio::sync::Mutex<crate::devops_store::DevopsStore>>,
+    pub close_to_tray: AtomicBool,
+    /// Pending file for the editor window to pick up on mount
+    pub pending_editor_file: Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
+    /// MCP server state. Constructed disabled, with no token and no shared
+    /// sessions: the listener does not exist until the user asks for it.
+    pub mcp: Arc<McpState>,
+    /// Peer-to-peer sharing configuration. Off by default; the webview
+    /// loads none of the sharing code until this says otherwise.
+    pub share: Arc<RwLock<crate::share::ShareConfig>>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        // Writable app data dir, resolved from Tauri's path API at startup.
+        // NOT `dirs::data_dir()` directly: on Android/iOS the OS sandbox isn't
+        // an XDG/known dir, so `dirs` yields a read-only path and vault writes
+        // fail with "Read-only file system (os error 30)". See crate::app_data_dir.
+        let app_dir = crate::app_data_dir();
+
+        Self {
+            ssh_manager: Arc::new(tokio::sync::Mutex::new(SshManager::new())),
+            tunnels: Arc::new(RwLock::new(HashMap::new())),
+            monitoring: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(desktop)]
+            pty_manager: Arc::new(Mutex::new(PtyManager::new())),
+            monitoring_collector: Arc::new(tokio::sync::Mutex::new(MonitoringCollector::new())),
+            tunnel_manager: Arc::new(tokio::sync::Mutex::new(TunnelManager::new())),
+            #[cfg(desktop)]
+            serial_manager: Arc::new(tokio::sync::Mutex::new(SerialManager::new())),
+            rdp_manager: Arc::new(tokio::sync::Mutex::new(RdpManager::new())),
+            vnc_manager: Arc::new(tokio::sync::Mutex::new(VncManager::new())),
+            vault_manager: Arc::new(tokio::sync::Mutex::new(VaultManager::new(app_dir.clone()))),
+            plugin_manager: Arc::new(tokio::sync::Mutex::new(PluginManager::new(app_dir.join("plugins")))),
+            marketplace_index_url: Arc::new(RwLock::new(
+                crate::plugin::marketplace::DEFAULT_INDEX_URL.to_string(),
+            )),
+            ansible_project_manager: Arc::new(tokio::sync::Mutex::new(AnsibleProjectManager::new())),
+            tofu_project_manager: Arc::new(tokio::sync::Mutex::new(TofuProjectManager::new())),
+            tofu_schema_cache: Arc::new(tokio::sync::Mutex::new(SchemaCache::default())),
+            containers: Arc::new(tokio::sync::Mutex::new(crate::container::ContainerManager::default())),
+            k8s: Arc::new(tokio::sync::Mutex::new(crate::k8s::K8sManager::default())),
+            devops_store: Arc::new(tokio::sync::Mutex::new(crate::devops_store::DevopsStore::default())),
+            db: Arc::new(tokio::sync::Mutex::new(crate::db::DbManager::new())),
+            close_to_tray: AtomicBool::new(false),
+            pending_editor_file: Arc::new(tokio::sync::Mutex::new(None)),
+            mcp: Arc::new(McpState::default()),
+            share: Arc::new(RwLock::new(crate::share::ShareConfig::default())),
+        }
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}

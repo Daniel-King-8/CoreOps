@@ -1,0 +1,1023 @@
+//! Building the shell commands that compress and extract files on the remote
+//! machine.
+//!
+//! Deliberately pure: this module decides *what* to run and never runs it, so
+//! every decision below is pinned by a test rather than discovered on someone
+//! else's server.
+//!
+//! Two things make this awkward, and both are handled here rather than at the
+//! call site.
+//!
+//! **The tools are not there.** `zip` is missing from most minimal images, and
+//! a naive "is zip installed?" check would put a dead menu item in front of
+//! half our users. So each operation has an ordered list of ways to do it and
+//! takes the first the machine can manage. Every chain bottoms out somewhere
+//! sensible, and the tar family bottoms out at `tar`, which is on effectively
+//! every Linux, macOS and BSD — so compressing always works, whatever else is
+//! missing.
+//!
+//! **Filenames are hostile.** A file really can be called `a;rm -rf ~` or
+//! `$(whoami).txt` or start with a dash. Every operand here goes through
+//! `shell_quote`, and every path is written `./name` so a leading dash can
+//! never be read as an option. That matters more than the `--` separator,
+//! which not every tool honours.
+//!
+//! There is no `.rar`. Creating one needs a proprietary binary that is not in
+//! most default repositories, so the menu entry would usually be a promise we
+//! could not keep.
+
+use crate::recipe::invoke::shell_quote;
+use serde::{Deserialize, Serialize};
+
+/// Everything worth probing for. Ordered roughly by how likely it is present.
+pub const PROBED_TOOLS: [&str; 13] = [
+    "tar", "gzip", "bzip2", "xz", "zstd", "zip", "unzip", "bsdtar", "7z", "7za", "7zz", "python3",
+    "stdbuf",
+];
+
+/// One command that reports which of the tools above exist.
+///
+/// `command -v` rather than `which`, because `which` is itself a package that
+/// minimal images leave out. One round trip, because this runs on every
+/// connection and a dozen of them would be felt.
+pub fn probe_command() -> String {
+    let names = PROBED_TOOLS.join(" ");
+    format!("for c in {names}; do command -v \"$c\" >/dev/null 2>&1 && printf '%s\\n' \"$c\"; done")
+}
+
+/// What a remote machine can actually do.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveTools {
+    pub present: Vec<String>,
+}
+
+impl ArchiveTools {
+    pub fn parse(stdout: &str) -> Self {
+        let present = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| PROBED_TOOLS.contains(l))
+            .map(str::to_string)
+            .collect();
+        Self { present }
+    }
+
+    pub fn has(&self, tool: &str) -> bool {
+        self.present.iter().any(|t| t == tool)
+    }
+
+    /// The first of `candidates` this machine has.
+    fn first(&self, candidates: &[&str]) -> Option<String> {
+        candidates
+            .iter()
+            .find(|c| self.has(c))
+            .map(|c| (*c).to_string())
+    }
+
+    /// Whichever 7-Zip spelling is installed. The name changed twice.
+    fn seven_zip(&self) -> Option<String> {
+        self.first(&["7zz", "7z", "7za"])
+    }
+}
+
+/// The formats offered for *creating* an archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ArchiveFormat {
+    TarGz,
+    TarBz2,
+    TarXz,
+    TarZst,
+    Zip,
+}
+
+impl ArchiveFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::TarGz => "tar.gz",
+            Self::TarBz2 => "tar.bz2",
+            Self::TarXz => "tar.xz",
+            Self::TarZst => "tar.zst",
+            Self::Zip => "zip",
+        }
+    }
+
+    /// The compressor `tar` shells out to, if this is a tar format.
+    fn compressor(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::TarGz => Some(("gzip", "-z")),
+            Self::TarBz2 => Some(("bzip2", "-j")),
+            Self::TarXz => Some(("xz", "-J")),
+            Self::TarZst => Some(("zstd", "--zstd")),
+            Self::Zip => None,
+        }
+    }
+}
+
+/// A command to run, and what to feed its standard input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    pub command: String,
+    /// The tool this plan chose, for telling the user what happened.
+    pub tool: String,
+}
+
+/// A zip writer that reports what it is doing.
+///
+/// `python3 -m zipfile -c` works but is completely silent, which on a machine
+/// with no `zip`, no `bsdtar` and no 7-Zip left the progress bar with nothing
+/// to count. This does the same job and names each file as it stores it.
+/// `flush=True` matters: without it the output is buffered and arrives at the
+/// end, which is the whole problem being solved.
+const PY_ZIP: &str = "import sys,zipfile,os
+z=zipfile.ZipFile(sys.argv[1],\"w\",zipfile.ZIP_DEFLATED)
+for a in sys.argv[2:]:
+    if os.path.isdir(a):
+        for r,_,fs in os.walk(a):
+            for f in fs:
+                p=os.path.join(r,f)
+                z.write(p)
+                print(p,flush=True)
+    else:
+        z.write(a)
+        print(a,flush=True)
+z.close()
+";
+
+/// The same for extraction.
+const PY_UNZIP: &str = "import sys,zipfile
+z=zipfile.ZipFile(sys.argv[1])
+for n in z.namelist():
+    z.extract(n,sys.argv[2])
+    print(n,flush=True)
+z.close()
+";
+
+/// Force the tool to flush each line as it produces it.
+///
+/// Over an SSH channel the tool's output is a pipe, not a terminal, so its C
+/// library switches from line buffering to block buffering and holds several
+/// kilobytes back. For a progress bar that is fatal: a zip of a few thousand
+/// files reports nothing at all and then every line at once at the end, so the
+/// bar sits at zero and jumps straight to done.
+///
+/// `stdbuf` is part of coreutils and present on essentially every Linux. It is
+/// absent on macOS, where the bar degrades to indeterminate rather than
+/// showing a number that is stuck — see `measurable`.
+fn line_buffered(tools: &ArchiveTools, command: String) -> String {
+    if tools.has("stdbuf") {
+        format!("stdbuf -oL -eL {command}")
+    } else {
+        command
+    }
+}
+
+/// Whether progress can honestly be reported for this run.
+///
+/// Needs both a tool that names each file and a way to stop its output being
+/// held in a buffer. Without both, a count would be a lie told slowly.
+pub fn is_measurable(_tools: &ArchiveTools, tool: &str) -> bool {
+    // Every one of these names each file as it reaches it. python3 is on the
+    // list because the scripts above print; the stdlib CLI it replaced did
+    // not. Buffering is handled by running under a pseudo-terminal, so no
+    // extra program has to be installed for a number to be honest.
+    matches!(
+        tool,
+        "tar" | "bsdtar" | "zip" | "unzip" | "7z" | "7za" | "7zz" | "python3"
+    )
+}
+
+/// Written `./name` so that a file called `-rf` is an operand, never a flag.
+fn operand(name: &str) -> String {
+    shell_quote(&format!("./{}", name.trim_start_matches("./")))
+}
+
+/// Move into the working directory first, so archives hold relative paths
+/// rather than the absolute path of whoever happened to build them.
+fn in_dir(dir: &str, rest: &str) -> String {
+    format!("cd -- {} && {}", shell_quote(dir), rest)
+}
+
+/// Which formats this machine can actually produce.
+pub fn creatable_formats(tools: &ArchiveTools) -> Vec<ArchiveFormat> {
+    let all = [
+        ArchiveFormat::TarGz,
+        ArchiveFormat::TarBz2,
+        ArchiveFormat::TarXz,
+        ArchiveFormat::TarZst,
+        ArchiveFormat::Zip,
+    ];
+    all.into_iter()
+        .filter(|f| create_supported(tools, *f))
+        .collect()
+}
+
+fn create_supported(tools: &ArchiveTools, format: ArchiveFormat) -> bool {
+    match format.compressor() {
+        Some((tool, _)) => (tools.has("tar") || tools.has("bsdtar")) && tools.has(tool),
+        None => {
+            tools.has("zip")
+                || tools.has("bsdtar")
+                || tools.seven_zip().is_some()
+                || tools.has("python3")
+        }
+    }
+}
+
+/// How to compress `entries` inside `dir` into `archive`.
+///
+/// Returns `None` when nothing on the machine can do it, which is the caller's
+/// cue to not offer it rather than to fail late.
+pub fn create_command(
+    tools: &ArchiveTools,
+    format: ArchiveFormat,
+    dir: &str,
+    entries: &[String],
+    archive: &str,
+) -> Option<Plan> {
+    if entries.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = entries.iter().map(|e| operand(e)).collect();
+    let joined = names.join(" ");
+    let out = operand(archive);
+
+    if let Some((tool, flag)) = format.compressor() {
+        if !tools.has(tool) {
+            return None;
+        }
+        // bsdtar understands the same short flags, and is `tar` on macOS.
+        let tar = tools.first(&["tar", "bsdtar"])?;
+        return Some(Plan {
+            command: in_dir(dir, &line_buffered(tools, format!("{tar} {flag} -cvf {out} {joined}"))),
+            tool: tar,
+        });
+    }
+
+    // Zip, in descending order of how well each does the job.
+    if tools.has("zip") {
+        return Some(Plan {
+            command: in_dir(dir, &line_buffered(tools, format!("zip -r {out} {joined}"))),
+            tool: "zip".into(),
+        });
+    }
+    if tools.has("bsdtar") {
+        return Some(Plan {
+            command: in_dir(dir, &line_buffered(tools, format!("bsdtar -a -cvf {out} {joined}"))),
+            tool: "bsdtar".into(),
+        });
+    }
+    if let Some(sz) = tools.seven_zip() {
+        return Some(Plan {
+            command: in_dir(dir, &line_buffered(tools, format!("{sz} a -bb1 -bsp0 -tzip {out} {joined}"))),
+            tool: sz,
+        });
+    }
+    if tools.has("python3") {
+        return Some(Plan {
+            command: in_dir(
+                dir,
+                &format!("python3 -c {} {out} {joined}", shell_quote(PY_ZIP)),
+            ),
+            tool: "python3".into(),
+        });
+    }
+    None
+}
+
+/// Candidate names for an output that must not collide with anything.
+///
+/// Compressing to a name that already exists would overwrite it, and
+/// extracting into a directory that already exists would merge into it. Both
+/// are bad on their own, and both make cancelling unsafe: if the output might
+/// not be ours, we cannot delete it to undo the operation.
+///
+/// The suffix goes before the extension, so `data.tar.gz` becomes
+/// `data-1.tar.gz` rather than `data.tar.gz-1`.
+pub fn candidate_names(base: &str) -> Vec<String> {
+    let (stem, ext) = split_extension(base);
+    let mut out = vec![base.to_string()];
+    for i in 1..=20 {
+        out.push(format!("{stem}-{i}{ext}"));
+    }
+    out
+}
+
+/// Split a name into stem and extension, treating the compound archive
+/// extensions as one unit.
+fn split_extension(name: &str) -> (String, String) {
+    let lower = name.to_ascii_lowercase();
+    const COMPOUND: [&str; 10] = [
+        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz2", ".txz", ".tzst", ".tar",
+        ".zip",
+    ];
+    for ext in COMPOUND {
+        if lower.ends_with(ext) {
+            return (
+                name[..name.len() - ext.len()].to_string(),
+                name[name.len() - ext.len()..].to_string(),
+            );
+        }
+    }
+    (name.to_string(), String::new())
+}
+
+/// A command that prints the first candidate name not already taken.
+///
+/// One round trip rather than one per candidate, and it prints nothing if all
+/// of them are taken, which the caller treats as a refusal.
+pub fn resolve_free_name_command(dir: &str, base: &str) -> String {
+    let list = candidate_names(base)
+        .iter()
+        .map(|c| shell_quote(c))
+        .collect::<Vec<_>>()
+        .join(" ");
+    in_dir(
+        dir,
+        &format!("for c in {list}; do [ -e \"./$c\" ] || {{ printf '%s' \"$c\"; break; }}; done"),
+    )
+}
+
+/// Where a running operation records its process id.
+///
+/// Derived from the operation id so cancelling needs nothing but that id. The
+/// id is sanitised because it reaches a shell: only the characters our own
+/// generator produces are allowed through.
+pub fn pid_file(operation_id: &str) -> String {
+    let safe: String = operation_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(64)
+        .collect();
+    format!("${{TMPDIR:-/tmp}}/reach-archive-{safe}.pid")
+}
+
+/// Wrap a command so it can be stopped later.
+///
+/// The shell records its own process id and then `exec`s a shell running the
+/// whole command, which keeps that id. Cancelling kills the process group, so
+/// the tool and anything it starts (tar's compressor) go with it. The command
+/// is not split at its first `&&` to `exec` the tool alone: extracting runs
+/// `mkdir` first, and an `exec` of that ended the shell before the tool ran,
+/// leaving an empty folder and reporting success.
+pub fn make_cancellable(command: &str, operation_id: &str) -> String {
+    let pid = pid_file(operation_id);
+    // The pid file path is a shell word containing a parameter expansion, so
+    // it is written unquoted on purpose; the id inside it is sanitised above.
+    format!("echo $$ > {pid} && exec sh -c {}", shell_quote(command))
+}
+
+/// Stop a running operation and undo what it produced.
+///
+/// Removing the output is only safe because the name was resolved to something
+/// that did not exist when the operation started, so whatever is there now was
+/// written by us. `produced` must be that resolved name.
+pub fn cancel_command(dir: &str, produced: &str, is_directory: bool, operation_id: &str) -> String {
+    let pid = pid_file(operation_id);
+    let target = operand(produced);
+    let remove = if is_directory {
+        format!("rm -rf -- {target}")
+    } else {
+        format!("rm -f -- {target}")
+    };
+    // Kill the process group as well as the process: tar shells out to gzip,
+    // and killing only tar can leave the compressor running on a pipe.
+    in_dir(
+        dir,
+        &format!(
+            "p=$(cat {pid} 2>/dev/null);              if [ -n \"$p\" ]; then kill -TERM -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null; fi;              sleep 1;              if [ -n \"$p\" ]; then kill -KILL -\"$p\" 2>/dev/null || kill -KILL \"$p\" 2>/dev/null; fi;              rm -f {pid}; {remove}"
+        ),
+    )
+}
+
+/// How many files an operation will touch, so progress has a denominator.
+///
+/// Counting is a separate, cheap command rather than something parsed out of
+/// the work itself, because none of these tools will tell you the total up
+/// front. It is allowed to fail: without a total the progress bar simply runs
+/// indeterminate, which is better than blocking the operation on a count.
+pub fn count_to_create(dir: &str, entries: &[String]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = entries.iter().map(|e| operand(e)).collect();
+    Some(in_dir(
+        dir,
+        &format!("find {} -type f 2>/dev/null | wc -l", names.join(" ")),
+    ))
+}
+
+/// How many members an archive holds.
+pub fn count_to_extract(tools: &ArchiveTools, dir: &str, archive: &str) -> Option<String> {
+    let kind = kind_of(archive)?;
+    let src = operand(archive);
+    let listing = match kind {
+        ArchiveKind::Tar => {
+            let tar = tools.first(&["tar", "bsdtar"])?;
+            format!("{tar} -tf {src}")
+        }
+        ArchiveKind::Zip => {
+            if tools.has("unzip") {
+                format!("unzip -Z1 {src}")
+            } else if tools.has("bsdtar") {
+                format!("bsdtar -tf {src}")
+            } else {
+                let sz = tools.seven_zip()?;
+                format!("{sz} l -ba -slt {src} | grep -c '^Path = '")
+            }
+        }
+    };
+    // 7-Zip already counts; everything else is one line per member.
+    if listing.contains("grep -c") {
+        Some(in_dir(dir, &listing))
+    } else {
+        Some(in_dir(dir, &format!("{listing} 2>/dev/null | wc -l")))
+    }
+}
+
+/// The archive families we can open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveKind {
+    Tar,
+    Zip,
+}
+
+/// Whether a filename looks like something we can extract, and how.
+///
+/// Compression is matched before the bare `.tar` so that `.tar.gz` is not read
+/// as a `.gz`, and `.tgz` and friends are included because they are common and
+/// cost nothing.
+pub fn kind_of(name: &str) -> Option<ArchiveKind> {
+    let lower = name.to_ascii_lowercase();
+    const TAR: [&str; 9] = [
+        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz2", ".txz", ".tzst", ".tar",
+    ];
+    if TAR.iter().any(|e| lower.ends_with(e)) {
+        return Some(ArchiveKind::Tar);
+    }
+    if lower.ends_with(".zip") {
+        return Some(ArchiveKind::Zip);
+    }
+    None
+}
+
+/// The directory name to extract into: the archive without its extension.
+///
+/// Extracting into a fresh directory rather than the current one is a
+/// deliberate safety choice. It stops an archive full of loose files from
+/// scattering them over the user's working directory, and it means a hostile
+/// archive cannot quietly replace a neighbouring file.
+pub fn extract_dir_name(archive: &str) -> String {
+    let lower = archive.to_ascii_lowercase();
+    const STRIP: [&str; 10] = [
+        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz2", ".txz", ".tzst", ".tar",
+        ".zip",
+    ];
+    for ext in STRIP {
+        if lower.ends_with(ext) {
+            return archive[..archive.len() - ext.len()].to_string();
+        }
+    }
+    archive.to_string()
+}
+
+/// How to extract `archive` inside `dir` into the subdirectory `dest`.
+pub fn extract_command(
+    tools: &ArchiveTools,
+    dir: &str,
+    archive: &str,
+    dest: &str,
+) -> Option<Plan> {
+    let kind = kind_of(archive)?;
+    let src = operand(archive);
+    let out = operand(dest);
+    // The destination is made first; extracting into a missing directory fails
+    // differently in every tool.
+    let mkdir = format!("mkdir -p -- {}", out);
+
+    match kind {
+        ArchiveKind::Tar => {
+            // Both tars sniff the compression themselves, so one form covers
+            // every member of the family. --no-same-owner keeps an archive
+            // built by root from trying to chown on the way out.
+            let tar = tools.first(&["tar", "bsdtar"])?;
+            Some(Plan {
+                command: in_dir(
+                    dir,
+                    &format!("{mkdir} && {}", line_buffered(tools, format!("{tar} -xvf {src} --no-same-owner -C {out}"))),
+                ),
+                tool: tar,
+            })
+        }
+        ArchiveKind::Zip => {
+            if tools.has("unzip") {
+                return Some(Plan {
+                    command: in_dir(dir, &format!("{mkdir} && {}", line_buffered(tools, format!("unzip -o {src} -d {out}")))),
+                    tool: "unzip".into(),
+                });
+            }
+            if tools.has("bsdtar") {
+                return Some(Plan {
+                    command: in_dir(dir, &format!("{mkdir} && {}", line_buffered(tools, format!("bsdtar -xvf {src} -C {out}")))),
+                    tool: "bsdtar".into(),
+                });
+            }
+            if let Some(sz) = tools.seven_zip() {
+                // 7-Zip takes no space after -o, which is easy to get wrong.
+                return Some(Plan {
+                    command: in_dir(
+                        dir,
+                        &format!("{mkdir} && {}", line_buffered(tools, format!("{sz} x -y -bb1 -bsp0 -o{out} {src}"))),
+                    ),
+                    tool: sz,
+                });
+            }
+            if tools.has("python3") {
+                return Some(Plan {
+                    command: in_dir(
+                        dir,
+                        &format!("{mkdir} && python3 -c {} {src} {out}", shell_quote(PY_UNZIP)),
+                    ),
+                    tool: "python3".into(),
+                });
+            }
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tools(list: &[&str]) -> ArchiveTools {
+        ArchiveTools {
+            present: list.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn one(name: &str) -> Vec<String> {
+        vec![name.to_string()]
+    }
+
+    #[test]
+    fn probe_asks_about_every_tool_and_survives_a_missing_which() {
+        let cmd = probe_command();
+        for tool in PROBED_TOOLS {
+            assert!(cmd.contains(tool), "probe never asks about {tool}");
+        }
+        assert!(cmd.contains("command -v"), "must not depend on `which`");
+        assert!(!cmd.contains("which "));
+    }
+
+    #[test]
+    fn probe_output_is_read_back_and_nonsense_ignored() {
+        let t = ArchiveTools::parse("tar\ngzip\nzip\n\nnot-a-tool\n  unzip  \n");
+        assert!(t.has("tar") && t.has("gzip") && t.has("zip") && t.has("unzip"));
+        assert!(!t.has("not-a-tool"));
+        assert!(!t.has("7z"));
+    }
+
+    // The point of the whole design: a machine with almost nothing can still
+    // compress, because tar and gzip are always there.
+    #[test]
+    fn a_bare_machine_can_still_make_a_tar_gz() {
+        let t = tools(&["tar", "gzip"]);
+        assert_eq!(creatable_formats(&t), vec![ArchiveFormat::TarGz]);
+        let plan = create_command(&t, ArchiveFormat::TarGz, "/srv", &one("data"), "data.tar.gz")
+            .expect("tar.gz must always be possible");
+        assert_eq!(
+            plan.command,
+            "cd -- '/srv' && tar -z -cvf './data.tar.gz' './data'"
+        );
+    }
+
+    #[test]
+    fn zip_falls_back_through_every_tool_in_turn() {
+        for (have, expected) in [
+            (vec!["tar", "gzip", "zip"], "zip"),
+            (vec!["tar", "gzip", "bsdtar"], "bsdtar"),
+            (vec!["tar", "gzip", "7zz"], "7zz"),
+            (vec!["tar", "gzip", "7za"], "7za"),
+            (vec!["tar", "gzip", "python3"], "python3"),
+        ] {
+            let t = tools(&have);
+            let plan = create_command(&t, ArchiveFormat::Zip, "/srv", &one("d"), "d.zip")
+                .unwrap_or_else(|| panic!("no zip plan with {have:?}"));
+            assert_eq!(plan.tool, expected, "wrong choice from {have:?}");
+        }
+    }
+
+    #[test]
+    fn zip_is_not_offered_when_nothing_can_make_one() {
+        let t = tools(&["tar", "gzip"]);
+        assert!(!creatable_formats(&t).contains(&ArchiveFormat::Zip));
+        assert!(create_command(&t, ArchiveFormat::Zip, "/srv", &one("d"), "d.zip").is_none());
+    }
+
+    #[test]
+    fn a_tar_format_needs_its_compressor_present() {
+        let t = tools(&["tar", "gzip"]);
+        // tar alone cannot make an xz without xz installed.
+        assert!(create_command(&t, ArchiveFormat::TarXz, "/srv", &one("d"), "d.tar.xz").is_none());
+        let with_xz = tools(&["tar", "gzip", "xz"]);
+        assert!(creatable_formats(&with_xz).contains(&ArchiveFormat::TarXz));
+    }
+
+    // Everything below is the part that decides whether this is safe.
+    #[test]
+    fn a_hostile_filename_cannot_reach_the_shell() {
+        let t = tools(&["tar", "gzip"]);
+        for nasty in [
+            "a; rm -rf ~",
+            "$(whoami).txt",
+            "`id`",
+            "a && reboot",
+            "a|b",
+            "it's mine",
+            "new\nline",
+        ] {
+            let plan =
+                create_command(&t, ArchiveFormat::TarGz, "/srv", &one(nasty), "out.tar.gz").unwrap();
+            let quoted = shell_quote(&format!("./{nasty}"));
+            assert!(
+                plan.command.contains(&quoted),
+                "{nasty:?} was not quoted into {}",
+                plan.command
+            );
+
+            // Stronger than hunting for stray metacharacters, which would
+            // trip over our own `cd ... && tar`: the command built for a
+            // hostile name must be structurally identical to the one built
+            // for a dull name, differing only inside the quoted operand.
+            let benign =
+                create_command(&t, ArchiveFormat::TarGz, "/srv", &one("plain"), "out.tar.gz")
+                    .unwrap();
+            assert_eq!(
+                plan.command.replace(&quoted, "<OPERAND>"),
+                benign
+                    .command
+                    .replace(&shell_quote("./plain"), "<OPERAND>"),
+                "{nasty:?} changed the shape of the command: {}",
+                plan.command
+            );
+        }
+    }
+
+    #[test]
+    fn a_leading_dash_is_an_operand_not_a_flag() {
+        let t = tools(&["tar", "gzip"]);
+        let plan =
+            create_command(&t, ArchiveFormat::TarGz, "/srv", &one("-rf"), "out.tar.gz").unwrap();
+        assert!(plan.command.contains("'./-rf'"), "{}", plan.command);
+        assert!(!plan.command.contains(" -rf"), "{}", plan.command);
+    }
+
+    #[test]
+    fn the_directory_is_quoted_too() {
+        let t = tools(&["tar", "gzip"]);
+        let plan = create_command(
+            &t,
+            ArchiveFormat::TarGz,
+            "/srv/it's here; rm -rf ~",
+            &one("d"),
+            "d.tar.gz",
+        )
+        .unwrap();
+        assert!(plan.command.starts_with("cd -- '/srv/it'\\''s here; rm -rf ~'"), "{}", plan.command);
+    }
+
+    #[test]
+    fn nothing_selected_produces_no_command() {
+        let t = tools(&["tar", "gzip"]);
+        assert!(create_command(&t, ArchiveFormat::TarGz, "/srv", &[], "x.tar.gz").is_none());
+    }
+
+    #[test]
+    fn compressed_tars_are_not_mistaken_for_their_compressor() {
+        for name in [
+            "x.tar.gz", "x.tar.bz2", "x.tar.xz", "x.tar.zst", "x.tgz", "x.tbz2", "x.txz", "x.tzst",
+            "x.tar",
+        ] {
+            assert_eq!(kind_of(name), Some(ArchiveKind::Tar), "{name}");
+        }
+        assert_eq!(kind_of("x.zip"), Some(ArchiveKind::Zip));
+        assert_eq!(kind_of("X.ZIP"), Some(ArchiveKind::Zip), "case must not matter");
+        for name in ["notes.txt", "x.rar", "archive", "x.gz", "x.7z"] {
+            assert_eq!(kind_of(name), None, "{name} should not offer extraction");
+        }
+    }
+
+    #[test]
+    fn rar_is_offered_nowhere() {
+        let everything = tools(&PROBED_TOOLS);
+        assert_eq!(kind_of("x.rar"), None);
+        let names: Vec<&str> = creatable_formats(&everything)
+            .iter()
+            .map(|f| f.extension())
+            .collect();
+        assert!(!names.iter().any(|n| n.contains("rar")), "{names:?}");
+    }
+
+    #[test]
+    fn the_extraction_directory_drops_the_whole_extension() {
+        assert_eq!(extract_dir_name("backup.tar.gz"), "backup");
+        assert_eq!(extract_dir_name("backup.tgz"), "backup");
+        assert_eq!(extract_dir_name("site.zip"), "site");
+        assert_eq!(extract_dir_name("a.b.tar.xz"), "a.b");
+        assert_eq!(extract_dir_name("noext"), "noext");
+    }
+
+    #[test]
+    fn extracting_always_makes_its_own_directory_first() {
+        let t = tools(&["tar", "unzip"]);
+        for archive in ["x.tar.gz", "x.zip"] {
+            let plan = extract_command(&t, "/srv", archive, "x").unwrap();
+            assert!(plan.command.contains("mkdir -p -- './x'"), "{}", plan.command);
+            let mkdir_at = plan.command.find("mkdir").unwrap();
+            let extract_at = plan.command.rfind("./x.").unwrap();
+            assert!(mkdir_at < extract_at, "directory must exist first");
+        }
+    }
+
+    #[test]
+    fn one_tar_form_opens_every_compressed_tar() {
+        let t = tools(&["tar"]);
+        // No gzip, no xz: tar still handles them, which is why the chain does
+        // not branch per compression on the way out.
+        for archive in ["x.tar.gz", "x.tar.xz", "x.tar.zst", "x.tar"] {
+            let plan = extract_command(&t, "/srv", archive, "x").unwrap();
+            assert!(plan.command.contains("tar -xvf"), "{archive}: {}", plan.command);
+            assert!(plan.command.contains("--no-same-owner"), "{archive}");
+        }
+    }
+
+    #[test]
+    fn unzipping_falls_back_through_every_tool_in_turn() {
+        for (have, expected) in [
+            (vec!["unzip"], "unzip"),
+            (vec!["bsdtar"], "bsdtar"),
+            (vec!["7z"], "7z"),
+            (vec!["python3"], "python3"),
+        ] {
+            let t = tools(&have);
+            let plan = extract_command(&t, "/srv", "a.zip", "a")
+                .unwrap_or_else(|| panic!("no unzip plan with {have:?}"));
+            assert_eq!(plan.tool, expected, "wrong choice from {have:?}");
+        }
+        assert!(extract_command(&tools(&["tar"]), "/srv", "a.zip", "a").is_none());
+    }
+
+    #[test]
+    fn seven_zip_takes_its_output_flag_without_a_space() {
+        let t = tools(&["7z"]);
+        let plan = extract_command(&t, "/srv", "a.zip", "a").unwrap();
+        assert!(plan.command.contains("-o'./a'"), "{}", plan.command);
+        assert!(!plan.command.contains("-o './a'"), "{}", plan.command);
+    }
+
+    // The bug this exists for: over a pipe, zip held every one of 3532 lines
+    // until the end, so the bar read "0 of 3532" for the whole operation.
+    #[test]
+    fn output_is_line_buffered_when_the_machine_can() {
+        let t = tools(&["tar", "gzip", "zip", "unzip", "stdbuf"]);
+        let create = create_command(&t, ArchiveFormat::Zip, "/srv", &one("d"), "d.zip").unwrap();
+        assert!(create.command.contains("stdbuf -oL -eL zip"), "{}", create.command);
+        let tar = create_command(&t, ArchiveFormat::TarGz, "/srv", &one("d"), "d.tar.gz").unwrap();
+        assert!(tar.command.contains("stdbuf -oL -eL tar"), "{}", tar.command);
+        let unzip = extract_command(&t, "/srv", "a.zip", "a").unwrap();
+        assert!(unzip.command.contains("stdbuf -oL -eL unzip"), "{}", unzip.command);
+        // The directory is made by the shell, not the tool, so it stays bare.
+        assert!(unzip.command.contains("mkdir -p -- './a' && stdbuf"), "{}", unzip.command);
+    }
+
+    #[test]
+    fn without_stdbuf_the_command_still_works_and_is_still_measurable() {
+        // Buffering is solved by the pseudo-terminal the command runs under,
+        // so a machine without coreutils still gets a progress bar.
+        let t = tools(&["tar", "gzip", "zip"]);
+        let plan = create_command(&t, ArchiveFormat::Zip, "/srv", &one("d"), "d.zip").unwrap();
+        assert!(!plan.command.contains("stdbuf"), "{}", plan.command);
+        assert!(plan.command.contains("zip -r"), "{}", plan.command);
+        assert!(is_measurable(&t, "zip"));
+    }
+
+    // The machine that prompted this: tar, gzip and python3, but no zip, no
+    // bsdtar, no 7-Zip and no stdbuf. Making a .zip there fell through to a
+    // silent tool and the bar never moved.
+    #[test]
+    fn a_machine_with_only_python_still_reports_progress() {
+        let t = tools(&["tar", "gzip", "bzip2", "xz", "zstd", "unzip", "python3"]);
+        let plan = create_command(&t, ArchiveFormat::Zip, "/srv", &one("d"), "d.zip").unwrap();
+        assert_eq!(plan.tool, "python3");
+        assert!(plan.command.contains("print(p,flush=True)"), "{}", plan.command);
+        assert!(!plan.command.contains("-m zipfile"), "the silent CLI must not be used");
+        assert!(is_measurable(&t, "python3"));
+
+        let extract = extract_command(&t, "/srv", "a.zip", "a").unwrap();
+        assert_eq!(extract.tool, "unzip", "unzip is present and preferred");
+    }
+
+    #[test]
+    fn the_python_scripts_survive_being_quoted_into_a_shell() {
+        let t = tools(&["python3"]);
+        let plan = create_command(&t, ArchiveFormat::Zip, "/srv", &one("d"), "d.zip").unwrap();
+        // One single-quoted argument, so newlines and quotes inside it are
+        // inert as far as the shell is concerned.
+        assert!(plan.command.contains("python3 -c '"), "{}", plan.command);
+        assert!(!plan.command.contains("
+
+"), "blank lines would end a python block");
+    }
+
+    #[test]
+    fn measurable_needs_both_a_talkative_tool_and_a_flushed_pipe() {
+        let full = tools(&PROBED_TOOLS);
+        for tool in ["tar", "bsdtar", "zip", "unzip", "7z"] {
+            assert!(is_measurable(&full, tool), "{tool} should be measurable");
+        }
+        // python3 counts too now that it prints what it stores.
+        assert!(is_measurable(&full, "python3"));
+        assert!(!is_measurable(&full, "something-else"));
+    }
+
+    #[test]
+    fn a_suffix_goes_before_the_extension_not_after_it() {
+        let c = candidate_names("data.tar.gz");
+        assert_eq!(c[0], "data.tar.gz");
+        assert_eq!(c[1], "data-1.tar.gz");
+        assert_eq!(c[2], "data-2.tar.gz");
+        assert_eq!(candidate_names("site.zip")[1], "site-1.zip");
+        // A plain directory name has no extension to preserve.
+        assert_eq!(candidate_names("backup")[1], "backup-1");
+        // Dots that are not an archive extension are part of the stem.
+        assert_eq!(candidate_names("a.b.tar.xz")[1], "a.b-1.tar.xz");
+    }
+
+    #[test]
+    fn resolving_a_free_name_quotes_every_candidate() {
+        let cmd = resolve_free_name_command("/srv", "it's mine.zip");
+        assert!(cmd.contains(&shell_quote("it's mine.zip")), "{cmd}");
+        assert!(cmd.contains(&shell_quote("it's mine-1.zip")), "{cmd}");
+        assert!(cmd.contains("[ -e"), "{cmd}");
+    }
+
+    #[test]
+    fn a_cancellable_command_runs_whole_under_the_recorded_pid() {
+        let t = tools(&["tar", "gzip", "stdbuf"]);
+        let plan = create_command(&t, ArchiveFormat::TarGz, "/srv", &one("d"), "d.tar.gz").unwrap();
+        let wrapped = make_cancellable(&plan.command, "archive-1-abc");
+        // exec keeps the shell's pid, which leads the group cancelling kills.
+        assert!(wrapped.starts_with("echo $$ >"), "{wrapped}");
+        assert!(wrapped.ends_with(&format!("&& exec sh -c {}", shell_quote(&plan.command))), "{wrapped}");
+    }
+
+    /// Cancelling stops the running tool and removes the folder it was
+    /// filling, with the whole command running under the recorded pid.
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_stops_a_running_extract() {
+        use std::os::unix::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("reach-cancel-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+        // A stand-in for a long extract: make the folder, then work slowly.
+        let command = in_dir(d, "mkdir -p -- './out' && sleep 30");
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(make_cancellable(&command, "cancel-test"))
+            .env("TMPDIR", &dir)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid_file = dir.join("reach-archive-cancel-test.pid");
+        for _ in 0..50 {
+            if dir.join("out").exists() && pid_file.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let started = std::time::Instant::now();
+        let cancelled = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cancel_command(d, "out", true, "cancel-test"))
+            .env("TMPDIR", &dir)
+            .status()
+            .unwrap();
+        assert!(cancelled.success());
+        let status = child.wait().unwrap();
+        let removed = !dir.join("out").exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!status.success(), "the work was killed, not finished");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "it did not run on to the end");
+        assert!(removed, "the folder it was filling is gone");
+    }
+
+    /// Extracting runs `mkdir` before the tool. Wrapped for cancelling, the
+    /// whole command must still run: an `exec` of the `mkdir` alone left an
+    /// empty folder and reported success.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancellable_extract_fills_the_folder() {
+        let dir = std::env::temp_dir().join(format!("reach-extract-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/sub")).unwrap();
+        std::fs::write(dir.join("src/sub/file.txt"), "inside").unwrap();
+        let made = std::process::Command::new("tar")
+            .args(["-czf", "it's mine.tar.gz", "-C", "src", "sub"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        let t = tools(&["tar", "gzip"]);
+        let d = dir.to_str().unwrap();
+        let plan = extract_command(&t, d, "it's mine.tar.gz", "it's mine").unwrap();
+        let ran = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(make_cancellable(&plan.command, "extract-test"))
+            .env("TMPDIR", &dir)
+            .status()
+            .unwrap();
+        assert!(ran.success());
+        let got = std::fs::read_to_string(dir.join("it's mine/sub/file.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got.unwrap(), "inside");
+    }
+
+    #[test]
+    fn an_operation_id_cannot_smuggle_anything_into_the_shell() {
+        let nasty = pid_file("a; rm -rf ~/`id`$(whoami)");
+        for meta in [';', '`', '$', '(', ')', '~', '/', ' '] {
+            let after = nasty.rsplit("reach-archive-").next().unwrap();
+            assert!(!after.contains(meta), "{meta:?} survived into {nasty}");
+        }
+        assert!(pid_file("archive-123-abc").contains("reach-archive-archive-123-abc.pid"));
+    }
+
+    #[test]
+    fn cancelling_kills_the_group_then_removes_only_what_we_made() {
+        let file = cancel_command("/srv", "out.tar.gz", false, "op1");
+        assert!(file.contains("kill -TERM"), "{file}");
+        assert!(file.contains("kill -KILL"), "{file}");
+        assert!(file.contains("rm -f -- './out.tar.gz'"), "{file}");
+        assert!(!file.contains("rm -rf"), "a file must not be removed recursively: {file}");
+
+        let dir = cancel_command("/srv", "out", true, "op1");
+        assert!(dir.contains("rm -rf -- './out'"), "{dir}");
+
+        // A hostile name is still just an operand.
+        let nasty = cancel_command("/srv", "a; rm -rf ~", true, "op1");
+        assert!(nasty.contains(&shell_quote("./a; rm -rf ~")), "{nasty}");
+    }
+
+    #[test]
+    fn counting_quotes_its_operands_too() {
+        let cmd = count_to_create("/srv", &one("a; rm -rf ~")).unwrap();
+        assert!(cmd.contains(&shell_quote("./a; rm -rf ~")), "{cmd}");
+        assert!(cmd.contains("wc -l"), "{cmd}");
+        assert!(count_to_create("/srv", &[]).is_none());
+    }
+
+    #[test]
+    fn counting_members_follows_the_same_chain_as_extracting() {
+        for (have, expect) in [
+            (vec!["tar"], "tar -tf"),
+            (vec!["unzip"], "unzip -Z1"),
+            (vec!["bsdtar"], "bsdtar -tf"),
+            (vec!["7z"], "grep -c"),
+        ] {
+            let t = tools(&have);
+            let archive = if have[0] == "tar" { "x.tar.gz" } else { "x.zip" };
+            let cmd = count_to_extract(&t, "/srv", archive)
+                .unwrap_or_else(|| panic!("no count with {have:?}"));
+            assert!(cmd.contains(expect), "{have:?}: {cmd}");
+        }
+        // Nothing that can open it means nothing to count.
+        assert!(count_to_extract(&tools(&["tar"]), "/srv", "x.zip").is_none());
+        assert!(count_to_extract(&tools(&["tar"]), "/srv", "notes.txt").is_none());
+    }
+
+    #[test]
+    fn every_command_says_what_it_is_doing_so_progress_can_be_counted() {
+        let t = tools(&PROBED_TOOLS);
+        // A quiet tool cannot be measured, so none of these may be quiet.
+        let create = create_command(&t, ArchiveFormat::TarGz, "/srv", &one("d"), "d.tar.gz").unwrap();
+        assert!(create.command.contains("-cvf"), "{}", create.command);
+        let zip = create_command(&tools(&["zip"]), ArchiveFormat::Zip, "/srv", &one("d"), "d.zip").unwrap();
+        assert!(!zip.command.contains(" -q"), "{}", zip.command);
+        let untar = extract_command(&t, "/srv", "x.tar.gz", "x").unwrap();
+        assert!(untar.command.contains("-xvf"), "{}", untar.command);
+        let unzip = extract_command(&tools(&["unzip"]), "/srv", "x.zip", "x").unwrap();
+        assert!(!unzip.command.contains(" -q"), "{}", unzip.command);
+    }
+
+    #[test]
+    fn a_hostile_archive_name_cannot_reach_the_shell_either() {
+        let t = tools(&["tar", "unzip"]);
+        let nasty = "a; rm -rf ~.zip";
+        let plan = extract_command(&t, "/srv", nasty, "a").unwrap();
+        assert!(plan.command.contains(&shell_quote(&format!("./{nasty}"))), "{}", plan.command);
+    }
+}

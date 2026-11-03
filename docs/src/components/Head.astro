@@ -1,0 +1,156 @@
+---
+/**
+ * What search engines, social cards and language models see.
+ *
+ * Starlight already emits a title, a description, a canonical link and basic
+ * Open Graph tags. This keeps all of that by rendering the default first and
+ * adds what it does not do: a real preview image, Twitter's card format, and
+ * the structured data that decides whether a result shows up as a plain blue
+ * link or as a software listing with a rating, a price and a platform.
+ *
+ * The JSON-LD is only emitted on the landing page. Repeating a
+ * SoftwareApplication graph on thirty documentation pages does not help the
+ * listing and reads as keyword stuffing.
+ */
+import Default from '@astrojs/starlight/components/Head.astro';
+import { KEYWORDS, ORG, PRODUCT } from '../site';
+import AdsConsent from './AdsConsent.astro';
+
+const canonical = Astro.site ? new URL(Astro.url.pathname, Astro.site).href : Astro.url.href;
+const origin = Astro.site?.href.replace(/\/$/, '') ?? '';
+// Built by scripts/make-og-image.mjs: the banner whole, never cropped, on a
+// blurred fill. Named .jpg rather than .png both because it is a fifth of the
+// weight and because renaming it is what makes Discord and Slack drop the
+// card they already cached.
+const image = `${origin}${import.meta.env.BASE_URL}og.jpg`.replace(/([^:])\/\//g, '$1/');
+
+const basePath = import.meta.env.BASE_URL.replace(/\/?$/, '/');
+
+// Which page this is, taken from the URL rather than from the props.
+// Starlight's entry shape moved between versions — `slug` became `id` under
+// Astro 5's content layer — and reading it defensively produced '' on every
+// page, which silently put the SoftwareApplication graph on all thirty-three
+// of them. The pathname is the one thing that is always right.
+const here = Astro.url.pathname.slice(basePath.length).replace(/\/$/, '');
+const isHome = here === '';
+
+const llmsUrl = `${basePath}llms.txt`;
+// The landing page has no markdown twin — it is a component, not prose.
+const markdownUrl = isHome ? '' : `${basePath}${here}.md`;
+
+const softwareGraph = {
+	'@context': 'https://schema.org',
+	'@graph': [
+		{
+			'@type': 'SoftwareApplication',
+			'@id': `${canonical}#software`,
+			name: PRODUCT.name,
+			alternateName: `${PRODUCT.name} SSH Client`,
+			description: PRODUCT.description,
+			applicationCategory: PRODUCT.categories,
+			operatingSystem: PRODUCT.platforms.join(', '),
+			url: canonical,
+			downloadUrl: `${PRODUCT.repo}/releases/latest`,
+			softwareVersion: undefined,
+			license: 'https://opensource.org/licenses/MIT',
+			isAccessibleForFree: true,
+			offers: {
+				'@type': 'Offer',
+				price: PRODUCT.price,
+				priceCurrency: PRODUCT.currency,
+				availability: 'https://schema.org/InStock',
+			},
+			// Kept in step with the documented feature pages. An assistant
+			// summarising Reach reads this, and anything missing here is a
+			// capability it will not know the product has.
+			featureList: [
+				'SSH terminal with tabs, split panes and WebGL rendering',
+				'SFTP file explorer with drag and drop transfers',
+				'Compress and extract archives on the remote machine',
+				'Drag files out of the explorer straight to your desktop',
+				'Encrypted vault for keys and passwords',
+				'Local port forwarding, plus remote and dynamic (SOCKS) forwards from ssh_config',
+				'Remote desktop over RDP and VNC, VNC optionally through SSH',
+				'Docker, Podman and Kubernetes through your SSH sessions',
+				'Database client',
+				'Jump hosts and SSH config import',
+				'Multi-exec: one command broadcast to many servers',
+				'Agentless system monitoring',
+				'Ansible playbooks and ad-hoc commands',
+				'OpenTofu plan, apply and state browsing',
+				'Serial console for routers and embedded devices',
+				'MCP server: hand a chosen session to an AI client',
+				'Recipes: reusable scripts with a declared risk level',
+				'Session sharing peer to peer over WebRTC',
+				'Sandboxed Lua plugins',
+				'AI assistant for command suggestions',
+				'Optional end to end encrypted sync',
+			],
+			screenshot: image,
+			image,
+			sameAs: [PRODUCT.repo],
+		},
+		{
+			'@type': 'WebSite',
+			'@id': `${origin}${import.meta.env.BASE_URL}#website`,
+			name: ORG.name,
+			// What Google falls back to when it will not use the name alone.
+			alternateName: ['reachssh.com', 'Reach SSH'],
+			url: `${origin}${import.meta.env.BASE_URL}`,
+			description: PRODUCT.description,
+			publisher: { '@id': `${origin}${import.meta.env.BASE_URL}#org` },
+		},
+		{
+			'@type': 'Organization',
+			'@id': `${origin}${import.meta.env.BASE_URL}#org`,
+			name: ORG.name,
+			url: `${origin}${import.meta.env.BASE_URL}`,
+			logo: image,
+			sameAs: [ORG.github, PRODUCT.repo],
+		},
+	],
+};
+---
+
+<Default {...Astro.props}><slot /></Default>
+
+<AdsConsent />
+
+<meta name="keywords" content={KEYWORDS.join(', ')} />
+<meta name="author" content={ORG.name} />
+<meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)" />
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+
+<meta property="og:site_name" content={ORG.name} />
+<meta property="og:image" content={image} />
+<meta property="og:image:type" content="image/jpeg" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content={`${PRODUCT.name} — ${PRODUCT.tagline}`} />
+
+<!--
+	Only the two tags Starlight does not emit. twitter:title and
+	twitter:description are deliberately absent: every client falls back to the
+	og: equivalents, which Starlight already writes per page — hardcoding the
+	product tagline here put the same headline on all thirty-three pages, and
+	on the home page it collided with the one set in frontmatter.
+-->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content={image} />
+
+<!--
+	Written for the readers that want the documentation rather than the page
+	around it: /llms.txt is the map, /llms-full.txt is all of it in one fetch,
+	and the link below is this page on its own as markdown.
+-->
+<link rel="alternate" type="text/plain" href={llmsUrl} title="llms.txt" />
+{!isHome && here && <link rel="alternate" type="text/markdown" href={markdownUrl} title="This page as markdown" />}
+
+{
+	isHome && (
+		<script
+			type="application/ld+json"
+			set:html={JSON.stringify(softwareGraph)}
+		/>
+	)
+}

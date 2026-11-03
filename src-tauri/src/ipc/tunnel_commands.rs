@@ -1,0 +1,132 @@
+use crate::state::{AppState, TunnelConfig, TunnelType};
+use crate::tunnel::manager::TunnelManager;
+use crate::plugin::hooks;
+
+/// Create a new tunnel configuration.
+#[tauri::command]
+pub async fn tunnel_create(
+    state: tauri::State<'_, AppState>,
+    tunnel_type: TunnelType,
+    local_port: u16,
+    remote_host: String,
+    remote_port: u16,
+    connection_id: String,
+) -> Result<TunnelConfig, String> {
+    let tunnel = TunnelManager::create_tunnel(
+        tunnel_type,
+        local_port,
+        &remote_host,
+        remote_port,
+        &connection_id,
+    );
+
+    let mut tunnels = state.tunnels.write().await;
+    tunnels.insert(tunnel.id.clone(), tunnel.clone());
+    tracing::info!("Created tunnel: {}", tunnel.id);
+
+    Ok(tunnel)
+}
+
+/// Start an existing tunnel, establishing the actual port forwarding.
+#[tauri::command]
+pub async fn tunnel_start(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    tunnel_id: String,
+) -> Result<(), String> {
+    // Get the SSH handle for this tunnel's connection
+    let (handle, mut tunnel_config) = {
+        let tunnels = state.tunnels.read().await;
+        let tunnel = tunnels
+            .get(&tunnel_id)
+            .ok_or_else(|| format!("Tunnel not found: {}", tunnel_id))?;
+
+        let ssh_manager = state.ssh_manager.lock().await;
+        let handle = ssh_manager
+            .get_handle(&tunnel.connection_id)
+            .map_err(|e| e.to_string())?;
+
+        (handle, tunnel.clone())
+    };
+
+    // Start the tunnel via TunnelManager
+    {
+        let mut tunnel_manager = state.tunnel_manager.lock().await;
+        tunnel_manager
+            .start_tunnel(&mut tunnel_config, &handle)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Update tunnel config in state to mark it active
+    let local_port = tunnel_config.local_port;
+    let mut tunnels = state.tunnels.write().await;
+    if let Some(t) = tunnels.get_mut(&tunnel_id) {
+        t.active = true;
+    }
+    drop(tunnels);
+
+    // Fire-and-forget hook dispatch — tunnel start completes for the user
+    // immediately; plugin reactions run in the background with a per-hook
+    // timeout enforced by PluginManager::dispatch_hook.
+    let hook = hooks::tunnel_started(&tunnel_id, local_port);
+    let plugin_mgr = state.plugin_manager.clone();
+    let app_for_hook = app.clone();
+    tokio::spawn(async move {
+        let mut mgr = plugin_mgr.lock().await;
+        mgr.dispatch_hook(&hook, Some(&app_for_hook)).await;
+    });
+
+    Ok(())
+}
+
+/// Stop an active tunnel.
+#[tauri::command]
+pub async fn tunnel_stop(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    tunnel_id: String,
+) -> Result<(), String> {
+    let mut tunnel_config = {
+        let tunnels = state.tunnels.read().await;
+        tunnels
+            .get(&tunnel_id)
+            .cloned()
+            .ok_or_else(|| format!("Tunnel not found: {}", tunnel_id))?
+    };
+
+    {
+        let mut tunnel_manager = state.tunnel_manager.lock().await;
+        tunnel_manager
+            .stop_tunnel(&mut tunnel_config)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Update tunnel config in state to mark it inactive
+    let mut tunnels = state.tunnels.write().await;
+    if let Some(t) = tunnels.get_mut(&tunnel_id) {
+        t.active = false;
+    }
+    drop(tunnels);
+
+    // Fire-and-forget hook dispatch (see tunnel_start for rationale).
+    let hook = hooks::tunnel_stopped(&tunnel_id);
+    let plugin_mgr = state.plugin_manager.clone();
+    let app_for_hook = app.clone();
+    tokio::spawn(async move {
+        let mut mgr = plugin_mgr.lock().await;
+        mgr.dispatch_hook(&hook, Some(&app_for_hook)).await;
+    });
+
+    Ok(())
+}
+
+/// List all configured tunnels.
+#[tauri::command]
+pub async fn tunnel_list(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<TunnelConfig>, String> {
+    let tunnels = state.tunnels.read().await;
+    Ok(tunnels.values().cloned().collect())
+}

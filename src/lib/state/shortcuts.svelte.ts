@@ -1,0 +1,160 @@
+import { createTab, closeTab, getActiveTab, getTabs, activateTab } from './tabs.svelte';
+import { toggleAIPanel } from './ai-chat.svelte';
+import { togglePalette, requestSessionAction } from './palette.svelte';
+import { stepUiZoom } from './ui-zoom';
+import { isMobile } from '#lib/platform.js';
+
+export interface Shortcut {
+	key: string;
+	ctrl?: boolean;
+	shift?: boolean;
+	alt?: boolean;
+	meta?: boolean;
+	action: string;
+	handler: () => void;
+}
+
+let settingsOpener: (() => void) | null = null;
+
+export function registerSettingsOpener(fn: () => void): void {
+	settingsOpener = fn;
+}
+
+/** The sessions sidebar's own actions, so a key can reach them from anywhere. */
+export interface SessionActions {
+	newSession: () => void;
+	quickConnect: () => void;
+}
+
+let sessionActions: SessionActions | null = null;
+
+export function registerSessionActions(actions: SessionActions | null): void {
+	sessionActions = actions;
+}
+
+/** How a shortcut is written on a menu: ⌘N on a Mac, Ctrl+N elsewhere. */
+export function shortcutLabel(key: string, mods: { ctrl?: boolean; shift?: boolean; alt?: boolean } = {}): string {
+	const k = key.length === 1 ? key.toUpperCase() : key;
+	if (isMac()) {
+		return `${mods.alt ? '⌥' : ''}${mods.shift ? '⇧' : ''}${mods.ctrl ? '⌘' : ''}${k}`;
+	}
+	return [mods.ctrl && 'Ctrl', mods.alt && 'Alt', mods.shift && 'Shift', k].filter(Boolean).join('+');
+}
+
+function isMac(): boolean {
+	return typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+}
+
+function nextTab(): void {
+	const tabs = getTabs();
+	if (tabs.length <= 1) return;
+
+	const activeIndex = tabs.findIndex((t) => t.active);
+	const nextIndex = (activeIndex + 1) % tabs.length;
+	activateTab(tabs[nextIndex].id);
+}
+
+function previousTab(): void {
+	const tabs = getTabs();
+	if (tabs.length <= 1) return;
+
+	const activeIndex = tabs.findIndex((t) => t.active);
+	const prevIndex = (activeIndex - 1 + tabs.length) % tabs.length;
+	activateTab(tabs[prevIndex].id);
+}
+
+function closeActiveTab(): void {
+	const active = getActiveTab();
+	if (active) {
+		closeTab(active.id);
+	}
+}
+
+export function openSettings(): void {
+	settingsOpener?.();
+}
+
+function openCommandPalette(): void {
+	togglePalette();
+}
+
+
+const ruKeyMap: Record<string, string> = {
+	'ф': 'a',
+	'ц': 'w',
+	'е': 't',
+	'з': 'p',
+	'б': ','
+};
+
+function normalizeKey(key: string): string {
+	const lower = key.toLowerCase();
+	return ruKeyMap[lower] ?? lower;
+}
+
+const shortcuts: Shortcut[] = [
+	{ key: 't', ctrl: true, action: 'New tab', handler: () => createTab('local') },
+	{ key: 'n', ctrl: true, action: 'New session', handler: () => requestSessionAction({ kind: 'new-session' }) },
+	{ key: 'n', ctrl: true, shift: true, action: 'Quick connect', handler: () => requestSessionAction({ kind: 'quick-connect' }) },
+	{ key: 'w', ctrl: true, shift: true, action: 'Close tab', handler: closeActiveTab },
+	{ key: 'Tab', ctrl: true, action: 'Next tab', handler: nextTab },
+	{ key: 'Tab', ctrl: true, shift: true, action: 'Previous tab', handler: previousTab },
+	{ key: ',', ctrl: true, action: 'Open settings', handler: openSettings },
+	{ key: 'p', ctrl: true, shift: true, action: 'Command palette', handler: openCommandPalette },
+	{ key: 'a', ctrl: true, shift: true, action: 'Toggle AI panel', handler: toggleAIPanel },
+	// The interface's size, as in a browser. Plus is Shift+= on most layouts
+	// and plain + on the number pad. Not on a phone: it follows the system.
+	...(isMobile()
+		? []
+		: [
+				{ key: '=', ctrl: true, action: 'Zoom in', handler: () => stepUiZoom(1) },
+				{ key: '+', ctrl: true, action: 'Zoom in', handler: () => stepUiZoom(1) },
+				{ key: '+', ctrl: true, shift: true, action: 'Zoom in', handler: () => stepUiZoom(1) },
+				{ key: '-', ctrl: true, action: 'Zoom out', handler: () => stepUiZoom(-1) },
+				{ key: '0', ctrl: true, action: 'Reset zoom', handler: () => stepUiZoom(0) }
+			])
+];
+
+function matchesShortcut(e: KeyboardEvent, shortcut: Shortcut): boolean {
+	const mac = isMac();
+	const modKey = mac ? e.metaKey : e.ctrlKey;
+
+	if (shortcut.ctrl && !modKey) return false;
+	if (!shortcut.ctrl && modKey) return false;
+
+	if (shortcut.shift && !e.shiftKey) return false;
+	if (!shortcut.shift && e.shiftKey) return false;
+
+	if (shortcut.alt && !e.altKey) return false;
+
+	return normalizeKey(e.key) === shortcut.key.toLowerCase() || e.key === shortcut.key;
+}
+
+function onKeydown(e: KeyboardEvent): void {
+	for (const shortcut of shortcuts) {
+		if (matchesShortcut(e, shortcut)) {
+			e.preventDefault();
+			e.stopPropagation();
+			shortcut.handler();
+			return;
+		}
+	}
+}
+
+let initialized = false;
+
+export function initShortcuts(): void {
+	if (initialized) return;
+	document.addEventListener('keydown', onKeydown, true);
+	initialized = true;
+}
+
+export function cleanupShortcuts(): void {
+	if (!initialized) return;
+	document.removeEventListener('keydown', onKeydown, true);
+	initialized = false;
+}
+
+export function getShortcuts(): Shortcut[] {
+	return shortcuts;
+}

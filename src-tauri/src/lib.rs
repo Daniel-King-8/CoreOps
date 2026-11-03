@@ -1,0 +1,1685 @@
+pub mod ansible;
+pub mod plugin;
+pub mod pwmanager;
+pub mod ipc;
+pub mod mcp;
+pub mod monitoring;
+#[cfg(desktop)]
+pub mod pty;
+pub mod rdp;
+pub mod vnc;
+pub mod container;
+pub mod db;
+pub mod devops;
+pub mod devops_store;
+pub mod k8s;
+pub mod logfiles;
+pub mod dragout;
+pub mod hardening;
+pub mod system_lock;
+pub mod http;
+pub mod recipe;
+pub mod report;
+pub mod share;
+pub mod sound;
+#[cfg(desktop)]
+pub mod serial;
+pub mod session;
+pub mod sftp;
+pub mod ssh;
+pub mod state;
+pub mod text;
+pub mod theme;
+pub mod tofu;
+pub mod toolchain;
+pub mod tunnel;
+pub mod vault;
+pub mod wsl;
+
+use std::sync::atomic::Ordering;
+
+use state::AppState;
+use tracing_subscriber::EnvFilter;
+
+use ipc::ansible_commands::*;
+use ipc::db_commands::*;
+use ipc::ai_commands::*;
+use ipc::update_commands::*;
+use ipc::container_commands::*;
+use ipc::k8s_commands::*;
+use ipc::plugin_commands::*;
+use ipc::marketplace_commands::*;
+use ipc::credential_commands::*;
+use ipc::settings_commands::*;
+use ipc::mcp_commands::*;
+use ipc::rdp_commands::*;
+use ipc::vnc_commands::*;
+use ipc::monitoring_commands::*;
+#[cfg(desktop)]
+use ipc::pty_commands::*;
+#[cfg(desktop)]
+use ipc::serial_commands::*;
+use ipc::session_commands::*;
+use ipc::sftp_commands::*;
+use ipc::dragout_commands::*;
+use ipc::webview_commands::*;
+use ipc::ssh_commands::*;
+use ipc::sshconfig_commands::*;
+use ipc::x11server_commands::*;
+use ipc::sshkey_commands::*;
+use ipc::tofu_commands::*;
+use ipc::theme_commands::*;
+use ipc::toolchain_commands::*;
+use ipc::tunnel_commands::*;
+use ipc::vault_commands::*;
+use ipc::editor_commands::*;
+use ipc::snippet_commands::*;
+use ipc::recipe_commands::*;
+use ipc::share_commands::*;
+use ipc::pwmanager_commands::*;
+
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Process-wide writable app data directory, resolved once at startup from
+/// Tauri's path API. Using a global (instead of `dirs::data_dir()`) is what
+/// makes mobile work: on Android/iOS the OS sandbox isn't an XDG/known dir, so
+/// `dirs` returns a non-writable path and every file write fails with
+/// "Read-only file system (os error 30)". `AppState` and the SSH known-hosts
+/// store read from this instead.
+static APP_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The app, for code with no handle of its own that needs a mobile plugin:
+/// the keychain functions, which on Android go through the Keystore.
+#[cfg(target_os = "android")]
+static ANDROID_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+#[cfg(target_os = "android")]
+pub fn android_app() -> Option<&'static tauri::AppHandle> {
+    ANDROID_APP.get()
+}
+
+/// Record the resolved app data directory. Call once, early in `setup()`.
+pub fn set_app_data_dir(dir: PathBuf) {
+    let _ = APP_DATA_DIR.set(dir);
+}
+
+/// The writable app data directory. Falls back to the desktop `dirs` location
+/// when not yet set (tests / very early startup before `setup()` runs).
+pub fn app_data_dir() -> PathBuf {
+    APP_DATA_DIR.get().cloned().unwrap_or_else(|| {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("com.reach.app")
+    })
+}
+
+#[tauri::command]
+fn set_close_to_tray(state: tauri::State<'_, AppState>, enabled: bool) {
+    state.close_to_tray.store(enabled, Ordering::Relaxed);
+}
+
+#[tauri::command]
+fn get_close_to_tray(state: tauri::State<'_, AppState>) -> bool {
+    state.close_to_tray.load(Ordering::Relaxed)
+}
+
+/// Exit the whole app. The frontend calls this after confirming there are no
+/// active SSH sessions (or the user accepted terminating them) — see the tray
+/// "Quit" → `app-quit-requested` flow in `AppShell.svelte`.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    // A password manager passphrase kept in memory goes before the process
+    // does (it is encrypted there, but there is no reason to leave it).
+    pwmanager::forget_passphrase();
+    app.exit(0);
+}
+
+/// Let a held key repeat instead of offering accented characters.
+///
+/// macOS ships `ApplePressAndHoldEnabled` on, and WebKit honours it: hold a key
+/// over an editable element — which is what xterm.js focuses — and AppKit opens
+/// the accent picker rather than sending key repeats. In a terminal that means
+/// holding an arrow, Backspace or any character does *nothing at all*, which is
+/// exactly how it was reported (issue #47).
+///
+/// It has to be done here, at runtime. `ApplePressAndHoldEnabled` is read from
+/// `NSUserDefaults`, and `Info.plist` is not one of its domains, so the key that
+/// several projects put in their plist is never read by anything. Registering it
+/// puts the value in the *registration* domain: the lowest priority there is, so
+/// a user who has deliberately set the key either way still wins, and nothing is
+/// written to their preferences file.
+#[cfg(target_os = "macos")]
+fn disable_press_and_hold() {
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::{class, msg_send};
+    use std::ffi::c_char;
+
+    // SAFETY: plain Foundation constructors and one setter, each null-checked
+    // before it is used. Nothing here is kept past the call.
+    unsafe {
+        let name = c"ApplePressAndHoldEnabled".as_ptr() as *const c_char;
+        let key: *mut AnyObject = msg_send![class!(NSString), stringWithUTF8String: name];
+        let value: *mut AnyObject = msg_send![class!(NSNumber), numberWithBool: Bool::NO];
+        if key.is_null() || value.is_null() {
+            return;
+        }
+        let dict: *mut AnyObject =
+            msg_send![class!(NSDictionary), dictionaryWithObject: value, forKey: key];
+        if dict.is_null() {
+            return;
+        }
+        let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        if defaults.is_null() {
+            return;
+        }
+        let _: () = msg_send![defaults, registerDefaults: dict];
+    }
+}
+/// Log to the console as before, and on desktop also to
+/// `<app data>/logs/reach.log`, so a user who hits a problem has something to
+/// send (issue #77 came with a screenshot and nothing else). The file starts
+/// over past 5 MB, keeping the one before as `reach.1.log`.
+fn init_logging() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let file = log_file().map(|f| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(f))
+    });
+    use tracing_subscriber::Layer;
+    // Each output has its own filter, so a connection's LogLevel can see
+    // debug messages that the console and the file leave out.
+    let file_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(filter))
+        .with(file.map(|f| f.with_filter(file_filter)))
+        .with(crate::ssh::connlog::ConnLogLayer.with_filter(crate::ssh::connlog::ConnLogFilter))
+        .init();
+
+    // A panic is printed to stderr, which nobody sees when Reach is started
+    // from a menu: a crash left nothing in the log (issue #87). Put it there.
+    let print = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        tracing::error!("Panic on thread {}: {info}", thread.name().unwrap_or("unnamed"));
+        print(info);
+    }));
+}
+
+#[cfg(desktop)]
+fn log_file() -> Option<std::fs::File> {
+    const LIMIT: u64 = 5 * 1024 * 1024;
+    let dir = app_data_dir().join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    purge_logs_with_secrets(&dir);
+    let path = dir.join("reach.log");
+    if std::fs::metadata(&path).map(|m| m.len() > LIMIT).unwrap_or(false) {
+        let _ = std::fs::rename(&path, dir.join("reach.1.log"));
+    }
+    std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
+}
+
+/// Up to 0.8.0, creating or editing a session wrote its login (password, key
+/// passphrase, embedded key, proxy password) into reach.log, and opening a
+/// synced vault its token. Those logs are deleted once, before anything new
+/// is written; the marker keeps later starts from deleting new logs.
+#[cfg(desktop)]
+fn purge_logs_with_secrets(dir: &std::path::Path) {
+    let marker = dir.join(".secrets-purged");
+    if marker.exists() {
+        return;
+    }
+    let mut cleared = true;
+    for name in ["reach.log", "reach.1.log"] {
+        let path = dir.join(name);
+        if path.exists() && std::fs::remove_file(&path).is_err() {
+            cleared = false;
+        }
+    }
+    // Only marked done when both are gone, so a file that was locked is
+    // tried again next start.
+    if cleared {
+        let _ = std::fs::write(&marker, b"");
+    }
+}
+
+/// Mobile platforms keep their own system log (logcat on Android).
+#[cfg(mobile)]
+fn log_file() -> Option<std::fs::File> {
+    None
+}
+
+/// Build and run the Tauri application.
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    // A development build can be pointed at a data folder of its own, so
+    // testing never runs against the user's real vault. First, before the
+    // log file opens. Compiled out of release builds: what an installed
+    // Reach opens is never decided by an environment variable.
+    #[cfg(debug_assertions)]
+    if let Some(dir) = std::env::var_os("REACH_DEV_DATA_DIR").filter(|d| !d.is_empty()) {
+        set_app_data_dir(PathBuf::from(dir));
+    }
+    init_logging();
+
+    // TLS for HTTPS (reqwest) and every other rustls user: ring, which the
+    // database drivers already build in. reqwest is compiled without a
+    // provider of its own and asks for this one at its first request.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // Before any secret is in memory: keep other programs out of it.
+    hardening::protect_process();
+
+    // Android keeps its trusted certificate authorities in a directory, not in
+    // a file or store rustls-native-certs knows, so it found none and every
+    // TLS user that asks for the platform's roots failed there: RDP's TLS
+    // upgrade stopped with "the platform certificate store contains no usable
+    // roots". That crate honours SSL_CERT_DIR, so point it at Android's own
+    // (Android 14 moved it into the Conscrypt APEX).
+    #[cfg(target_os = "android")]
+    if std::env::var_os("SSL_CERT_DIR").is_none() {
+        let dir = ["/apex/com.android.conscrypt/cacerts", "/system/etc/security/cacerts"]
+            .into_iter()
+            .find(|d| std::path::Path::new(d).is_dir());
+        if let Some(dir) = dir {
+            std::env::set_var("SSL_CERT_DIR", dir);
+            tracing::info!("Trusted certificates from {}", dir);
+        }
+    }
+
+    tracing::info!("Starting CoreOps application");
+
+    // Work around WebKitGTK DMA-BUF protocol errors on Wayland (KDE Plasma, etc.)
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_err() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            tracing::info!("Set WEBKIT_DISABLE_DMABUF_RENDERER=1 for Wayland compatibility");
+        }
+    }
+
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_reach_unlock::init());
+    // NOTE: AppState is managed inside `setup()` (not here) so it can be rooted
+    // at the Tauri-resolved, writable app data dir — required on Android/iOS.
+
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+                use tauri::Manager;
+                // When a second instance is launched, focus the existing window
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }))
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_autostart::init(
+                tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                None,
+            ))
+            // Dragging a file out of the window onto the desktop. The OS never
+            // reports where a drag was dropped, so this can only hand it a
+            // file that already exists locally — see src/lib/explorer/drag-out.
+            .plugin(tauri_plugin_drag::init());
+    }
+
+    #[cfg(desktop)]
+    {
+        builder = builder.invoke_handler(tauri::generate_handler![
+            // MCP server. Off until the user enables it; nothing here starts
+            // a listener or shares a session on its own.
+            mcp_start,
+            rdp_connect,
+            rdp_disconnect,
+            rdp_mouse,
+            rdp_key,
+            rdp_unicode,
+            rdp_resize,
+            rdp_ack,
+            rdp_disconnect_all,
+            rdp_clipboard_sync,
+            rdp_window_fullscreen,
+            vnc_connect,
+            vnc_disconnect,
+            vnc_disconnect_all,
+            vnc_ack,
+            vnc_mouse,
+            vnc_key,
+            vnc_resize,
+            vnc_clipboard_sync,
+            mcp_stop,
+            mcp_status,
+            mcp_restore,
+            mcp_share_session,
+            mcp_unshare_session,
+            mcp_list_agents,
+            mcp_set_agent,
+            mcp_set_mode,
+            mcp_set_session_agent,
+            mcp_set_session_mode,
+            mcp_regenerate_token,
+            mcp_confirm_response,
+            // SSH commands
+            ssh_connect,
+            ssh_disconnect,
+            ssh_send,
+            ssh_ready,
+            ssh_hostkey_response,
+            ssh_auth_prompt_response,
+            session_log_default_dir,
+            app_update_check,
+            ctr_open,
+            ctr_open_live,
+            ctr_hosts,
+            ctr_host_save,
+            ctr_host_delete,
+            ctr_close,
+            ctr_containers,
+            ctr_images,
+            ctr_volumes,
+            ctr_networks,
+            ctr_projects,
+            ctr_act,
+            ctr_remove,
+            ctr_inspect,
+            ctr_compose,
+            ctr_logs,
+            ctr_logs_stop,
+            ctr_log_files,
+            ctr_logs_files,
+            devops_log_rules,
+            devops_log_rules_save,
+            ctr_shell_command,
+            k8s_contexts,
+            k8s_clusters,
+            k8s_cluster_save,
+            k8s_cluster_delete,
+            k8s_open,
+            k8s_close,
+            k8s_namespaces,
+            k8s_pods,
+            k8s_workloads,
+            k8s_objects,
+            k8s_events,
+            k8s_get_yaml,
+            k8s_replace_yaml,
+            k8s_delete,
+            k8s_scale,
+            k8s_restart,
+            k8s_logs,
+            k8s_logs_stop,
+            k8s_log_files,
+            k8s_logs_files,
+            k8s_helm_releases,
+            k8s_helm_history,
+            k8s_helm_detail,
+            k8s_helm_run,
+            ssh_resize,
+            ssh_list_connections,
+            ssh_detect_os,
+            inspect_key_file,
+            // SSH Config commands
+            sshconfig_scan,
+            x11server_status,
+            x11server_install,
+            x11server_cancel,
+            x11server_remove,
+            sshconfig_exists,
+            ssh_options_report,
+            ssh_key_import,
+            ssh_key_list,
+            ssh_key_update,
+            ssh_key_delete,
+            ssh_key_public,
+            // SFTP commands
+            sftp_list_dir,
+            sftp_upload,
+            sftp_download,
+            sftp_delete,
+            sftp_rename,
+            sftp_mkdir,
+            sftp_touch,
+            sftp_read_file,
+            sftp_write_file,
+            sftp_archive_tools,
+            sftp_archive_create,
+            sftp_archive_extract,
+            sftp_archive_cancel,
+            drag_preview_icon,
+            dragout_start,
+            webview_refocus,
+            report::report_prepare,
+            report::report_reveal,
+            sound::play_notification_sound,
+            // Session commands
+            session_list,
+            session_get,
+            session_create,
+            wsl_list_distros,
+            session_update,
+            session_untrusted_secret_refs,
+            session_approve_secret_refs,
+            session_delete,
+            session_move_to_folder,
+            session_list_folders,
+            session_create_folder,
+            session_update_folder_parent,
+            session_delete_folder,
+            session_share,
+            // Tunnel commands
+            tunnel_create,
+            tunnel_start,
+            tunnel_stop,
+            tunnel_list,
+            // PTY commands
+            pty_spawn,
+            pty_write,
+            pty_resize,
+            pty_close,
+            // Serial commands
+            serial_list_ports,
+            serial_open,
+            serial_close,
+            serial_send,
+            // Monitoring commands
+            monitoring_start,
+            monitoring_start_wsl,
+            monitoring_stop,
+            monitoring_get_stats,
+            // AI commands
+            ai_chat,
+            ai_fetch_models,
+            // Credential commands
+            credential_set_master_password,
+            credential_verify_master_password,
+            credential_is_locked,
+            credential_lock,
+            credential_has_master_password,
+            // Settings commands
+            settings_get_all,
+            settings_get,
+            settings_set,
+            settings_delete,
+            settings_save_all,
+            // Vault commands
+            vault_init_identity,
+            vault_unlock,
+            vault_auto_unlock,
+            vault_reset,
+            vault_export_identity,
+            vault_import_identity,
+            vault_lock,
+            vault_is_held,
+            vault_resume,
+            vault_unlock_methods,
+            vault_biometric_enable,
+            vault_biometric_unlock,
+            vault_security_key_add,
+            vault_security_key_unlock,
+            vault_unlock_method_remove,
+            vault_is_locked,
+            vault_has_identity,
+            vault_get_public_key,
+            vault_get_user_uuid,
+            vault_create,
+            vault_open,
+            vault_close,
+            vault_list,
+            vault_duplicates,
+            vault_unlock_vault,
+            vault_lock_vault,
+            vault_sync,
+            vault_secret_create,
+            vault_secret_read,
+            vault_secret_update,
+            vault_secret_delete,
+            vault_secret_list,
+            vault_invite_member,
+            vault_accept_invite,
+            vault_remove_member,
+            vault_list_members,
+            vault_delete,
+            // Vault sharing individual items
+            vault_share_item,
+            vault_list_shared_items,
+            vault_revoke_shared_item,
+            vault_accept_shared_item,
+            vault_list_received_shares,
+            // Vault settings
+            vault_get_settings,
+            vault_save_settings,
+            vault_get_turso_config,
+            vault_set_turso_config,
+            // Turso Platform API
+            turso_create_database,
+            turso_create_database_token,
+            // Personal sync config
+            vault_set_personal_sync,
+            vault_get_personal_sync,
+            // Full backup
+            vault_export_backup,
+            vault_preview_backup,
+            vault_import_backup,
+            // Toolchain commands
+            toolchain_check,
+            toolchain_install,
+            // Ansible commands
+            ansible_list_projects,
+            ansible_create_project,
+            ansible_delete_project,
+            ansible_open_project,
+            ansible_update_inventory,
+            ansible_list_files,
+            ansible_read_file,
+            ansible_write_file,
+            ansible_run_command,
+            ansible_engines,
+            ansible_remote_engine,
+            ansible_generate_inventory,
+            ansible_write_inventory,
+            ansible_list_roles,
+            ansible_list_collections,
+            ansible_vault_view,
+            // OpenTofu commands
+            tofu_list_projects,
+            tofu_create_project,
+            tofu_delete_project,
+            tofu_open_project,
+            tofu_run_command,
+            tofu_binary_status,
+            tofu_binary_install,
+            tofu_binary_pin,
+            tofu_binary_remove,
+            tofu_read_file,
+            tofu_write_file,
+            tofu_list_files,
+            tofu_get_provider_catalog,
+            tofu_update_providers,
+            tofu_update_variables,
+            tofu_update_environments,
+            tofu_generate_hcl,
+            tofu_write_generated_files,
+            tofu_get_resource_catalog,
+            tofu_update_resources,
+            tofu_state_list_resources,
+            tofu_update_outputs,
+            tofu_get_output_values,
+            tofu_get_dependency_graph,
+            tofu_get_templates,
+            tofu_apply_template,
+            tofu_update_backend,
+            tofu_update_encryption,
+            tofu_discard_plan,
+            tofu_update_data_sources,
+            tofu_get_data_source_catalog,
+            tofu_update_locals,
+            tofu_update_modules,
+            tofu_get_backend_catalog,
+            tofu_workspace_list,
+            tofu_workspace_new,
+            tofu_workspace_select,
+            tofu_workspace_delete,
+            tofu_fmt,
+            tofu_show_plan_json,
+            tofu_fetch_schema,
+            tofu_get_cached_schema,
+            tofu_get_schema_resource_fields,
+            // Plugin commands
+            plugin_discover,
+            plugin_load,
+            plugin_unload,
+            plugin_reload,
+            plugin_list,
+            plugin_call_action,
+            plugin_get_ui,
+            plugin_get_config,
+            plugin_set_config,
+            plugin_get_dir,
+            plugin_set_dir,
+            plugin_dispatch_hook,
+            // Marketplace commands
+            marketplace_fetch,
+            marketplace_install,
+            marketplace_uninstall,
+            marketplace_get_url,
+            marketplace_set_url,
+            marketplace_load_url,
+            marketplace_reset_url,
+            theme_fetch_registry,
+            theme_install,
+            theme_list_installed,
+            theme_uninstall,
+            theme_default_registry_url,
+            // Editor commands
+            editor_open_file,
+            editor_get_pending_file,
+            editor_hide_window,
+            // Snippet commands
+            snippet_list,
+            snippet_create,
+            snippet_update,
+            snippet_delete,
+            recipe_list,
+            recipe_get,
+            recipe_preview,
+            recipe_save,
+            recipe_delete,
+            recipe_template,
+            recipe_prepare,
+            recipe_fetch_registry,
+            recipe_install,
+            recipe_registry_url,
+            share_get_config,
+            share_set_enabled,
+            share_set_ice_servers,
+            share_reset_ice_servers,
+            share_load,
+            // Password managers. Off until the user turns them on; nothing
+            // here returns a secret.
+            pwmanager_get_config,
+            pwmanager_save_config,
+            pwmanager_status,
+            pwmanager_test,
+            pwmanager_list,
+            pwmanager_passphrase_response,
+            pwmanager_forget_passphrase,
+            devops::devops_set_enabled,
+            devops::devops_save_text,
+            // Databases
+            db_list_connections,
+            db_save_connection,
+            db_delete_connection,
+            db_test_connection,
+            db_route_preview,
+            db_connect,
+            db_disconnect,
+            db_databases,
+            db_schemas,
+            db_objects,
+            db_completion,
+            db_definition,
+            db_analyze,
+            db_execute,
+            db_cancel,
+            db_close_session,
+            db_table_rows,
+            db_table_design,
+            db_preview_edits,
+            db_apply_edits,
+            db_preview_design,
+            db_apply_design,
+            db_server_info,
+            db_sessions,
+            db_kill,
+            db_cancel_job,
+            db_backup,
+            db_restore,
+            db_csv_preview,
+            db_import_csv,
+            db_export,
+            db_detect,
+            db_redis_databases,
+            db_redis_scan,
+            db_redis_get,
+            db_redis_command,
+            db_redis_info,
+            db_redis_clients,
+            // Tray commands
+            set_close_to_tray,
+            get_close_to_tray,
+            quit_app,
+        ]);
+    }
+
+    #[cfg(not(desktop))]
+    {
+        builder = builder.invoke_handler(tauri::generate_handler![
+            // MCP server. Off until the user enables it; nothing here starts
+            // a listener or shares a session on its own.
+            mcp_start,
+            rdp_connect,
+            rdp_disconnect,
+            rdp_mouse,
+            rdp_key,
+            rdp_unicode,
+            rdp_resize,
+            rdp_ack,
+            rdp_disconnect_all,
+            rdp_clipboard_sync,
+            rdp_window_fullscreen,
+            vnc_connect,
+            vnc_disconnect,
+            vnc_disconnect_all,
+            vnc_ack,
+            vnc_mouse,
+            vnc_key,
+            vnc_resize,
+            vnc_clipboard_sync,
+            mcp_stop,
+            mcp_status,
+            mcp_restore,
+            mcp_share_session,
+            mcp_unshare_session,
+            mcp_list_agents,
+            mcp_set_agent,
+            mcp_set_mode,
+            mcp_set_session_agent,
+            mcp_set_session_mode,
+            mcp_regenerate_token,
+            mcp_confirm_response,
+            // SSH commands
+            ssh_connect,
+            ssh_disconnect,
+            ssh_send,
+            ssh_ready,
+            ssh_hostkey_response,
+            ssh_auth_prompt_response,
+            session_log_default_dir,
+            app_update_check,
+            ctr_open,
+            ctr_open_live,
+            ctr_hosts,
+            ctr_host_save,
+            ctr_host_delete,
+            ctr_close,
+            ctr_containers,
+            ctr_images,
+            ctr_volumes,
+            ctr_networks,
+            ctr_projects,
+            ctr_act,
+            ctr_remove,
+            ctr_inspect,
+            ctr_compose,
+            ctr_logs,
+            ctr_logs_stop,
+            ctr_log_files,
+            ctr_logs_files,
+            devops_log_rules,
+            devops_log_rules_save,
+            ctr_shell_command,
+            k8s_contexts,
+            k8s_clusters,
+            k8s_cluster_save,
+            k8s_cluster_delete,
+            k8s_open,
+            k8s_close,
+            k8s_namespaces,
+            k8s_pods,
+            k8s_workloads,
+            k8s_objects,
+            k8s_events,
+            k8s_get_yaml,
+            k8s_replace_yaml,
+            k8s_delete,
+            k8s_scale,
+            k8s_restart,
+            k8s_logs,
+            k8s_logs_stop,
+            k8s_log_files,
+            k8s_logs_files,
+            k8s_helm_releases,
+            k8s_helm_history,
+            k8s_helm_detail,
+            k8s_helm_run,
+            ssh_resize,
+            ssh_list_connections,
+            ssh_detect_os,
+            inspect_key_file,
+            // SSH Config commands
+            sshconfig_scan,
+            x11server_status,
+            x11server_install,
+            x11server_cancel,
+            x11server_remove,
+            sshconfig_exists,
+            ssh_options_report,
+            ssh_key_import,
+            ssh_key_list,
+            ssh_key_update,
+            ssh_key_delete,
+            ssh_key_public,
+            // SFTP commands
+            sftp_list_dir,
+            sftp_upload,
+            sftp_download,
+            sftp_delete,
+            sftp_rename,
+            sftp_mkdir,
+            sftp_touch,
+            sftp_read_file,
+            sftp_write_file,
+            sftp_archive_tools,
+            sftp_archive_create,
+            sftp_archive_extract,
+            sftp_archive_cancel,
+            drag_preview_icon,
+            dragout_start,
+            webview_refocus,
+            report::report_prepare,
+            report::report_reveal,
+            sound::play_notification_sound,
+            // Session commands
+            session_list,
+            session_get,
+            session_create,
+            wsl_list_distros,
+            session_update,
+            session_untrusted_secret_refs,
+            session_approve_secret_refs,
+            session_delete,
+            session_move_to_folder,
+            session_list_folders,
+            session_create_folder,
+            session_update_folder_parent,
+            session_delete_folder,
+            session_share,
+            // Tunnel commands
+            tunnel_create,
+            tunnel_start,
+            tunnel_stop,
+            tunnel_list,
+            // Monitoring commands
+            monitoring_start,
+            monitoring_start_wsl,
+            monitoring_stop,
+            monitoring_get_stats,
+
+            // AI commands
+            ai_chat,
+            ai_fetch_models,
+            // Credential commands
+            credential_set_master_password,
+            credential_verify_master_password,
+            credential_is_locked,
+            credential_lock,
+            credential_has_master_password,
+            // Settings commands
+            settings_get_all,
+            settings_get,
+            settings_set,
+            settings_delete,
+            settings_save_all,
+            // Vault commands
+            vault_init_identity,
+            vault_unlock,
+            vault_auto_unlock,
+            vault_reset,
+            vault_export_identity,
+            vault_import_identity,
+            vault_lock,
+            vault_is_held,
+            vault_resume,
+            vault_unlock_methods,
+            vault_biometric_enable,
+            vault_biometric_unlock,
+            vault_security_key_add,
+            vault_security_key_unlock,
+            vault_unlock_method_remove,
+            vault_is_locked,
+            vault_has_identity,
+            vault_get_public_key,
+            vault_get_user_uuid,
+            vault_create,
+            vault_open,
+            vault_close,
+            vault_list,
+            vault_duplicates,
+            vault_unlock_vault,
+            vault_lock_vault,
+            vault_sync,
+            vault_secret_create,
+            vault_secret_read,
+            vault_secret_update,
+            vault_secret_delete,
+            vault_secret_list,
+            vault_invite_member,
+            vault_accept_invite,
+            vault_remove_member,
+            vault_list_members,
+            vault_delete,
+            // Vault sharing individual items
+            vault_share_item,
+            vault_list_shared_items,
+            vault_revoke_shared_item,
+            vault_accept_shared_item,
+            vault_list_received_shares,
+            // Vault settings
+            vault_get_settings,
+            vault_save_settings,
+            vault_get_turso_config,
+            vault_set_turso_config,
+            // Turso Platform API
+            turso_create_database,
+            turso_create_database_token,
+            // Personal sync config
+            vault_set_personal_sync,
+            vault_get_personal_sync,
+            // Full backup
+            vault_export_backup,
+            vault_preview_backup,
+            vault_import_backup,
+            // Toolchain commands
+            toolchain_check,
+            toolchain_install,
+            // Ansible commands
+            ansible_list_projects,
+            ansible_create_project,
+            ansible_delete_project,
+            ansible_open_project,
+            ansible_update_inventory,
+            ansible_list_files,
+            ansible_read_file,
+            ansible_write_file,
+            ansible_run_command,
+            ansible_engines,
+            ansible_remote_engine,
+            ansible_generate_inventory,
+            ansible_write_inventory,
+            ansible_list_roles,
+            ansible_list_collections,
+            ansible_vault_view,
+            // OpenTofu commands
+            tofu_list_projects,
+            tofu_create_project,
+            tofu_delete_project,
+            tofu_open_project,
+            tofu_run_command,
+            tofu_binary_status,
+            tofu_binary_install,
+            tofu_binary_pin,
+            tofu_binary_remove,
+            tofu_read_file,
+            tofu_write_file,
+            tofu_list_files,
+            tofu_get_provider_catalog,
+            tofu_update_providers,
+            tofu_update_variables,
+            tofu_update_environments,
+            tofu_generate_hcl,
+            tofu_write_generated_files,
+            tofu_get_resource_catalog,
+            tofu_update_resources,
+            tofu_state_list_resources,
+            tofu_update_outputs,
+            tofu_get_output_values,
+            tofu_get_dependency_graph,
+            tofu_get_templates,
+            tofu_apply_template,
+            tofu_update_backend,
+            tofu_update_encryption,
+            tofu_discard_plan,
+            tofu_update_data_sources,
+            tofu_get_data_source_catalog,
+            tofu_update_locals,
+            tofu_update_modules,
+            tofu_get_backend_catalog,
+            tofu_workspace_list,
+            tofu_workspace_new,
+            tofu_workspace_select,
+            tofu_workspace_delete,
+            tofu_fmt,
+            tofu_show_plan_json,
+            tofu_fetch_schema,
+            tofu_get_cached_schema,
+            tofu_get_schema_resource_fields,
+            // Plugin commands
+            plugin_discover,
+            plugin_load,
+            plugin_unload,
+            plugin_reload,
+            plugin_list,
+            plugin_call_action,
+            plugin_get_ui,
+            plugin_get_config,
+            plugin_set_config,
+            plugin_get_dir,
+            plugin_set_dir,
+            plugin_dispatch_hook,
+            // Marketplace commands
+            marketplace_fetch,
+            marketplace_install,
+            marketplace_uninstall,
+            marketplace_get_url,
+            marketplace_set_url,
+            marketplace_load_url,
+            marketplace_reset_url,
+            theme_fetch_registry,
+            theme_install,
+            theme_list_installed,
+            theme_uninstall,
+            theme_default_registry_url,
+            // Editor commands
+            editor_open_file,
+            editor_get_pending_file,
+            editor_hide_window,
+            // Snippet commands
+            snippet_list,
+            snippet_create,
+            snippet_update,
+            snippet_delete,
+            recipe_list,
+            recipe_get,
+            recipe_preview,
+            recipe_save,
+            recipe_delete,
+            recipe_template,
+            recipe_prepare,
+            recipe_fetch_registry,
+            recipe_install,
+            recipe_registry_url,
+            share_get_config,
+            share_set_enabled,
+            share_set_ice_servers,
+            share_reset_ice_servers,
+            share_load,
+            // Password managers. Off until the user turns them on; nothing
+            // here returns a secret.
+            pwmanager_get_config,
+            pwmanager_save_config,
+            pwmanager_status,
+            pwmanager_test,
+            pwmanager_list,
+            pwmanager_passphrase_response,
+            pwmanager_forget_passphrase,
+            devops::devops_set_enabled,
+            devops::devops_save_text,
+            // Databases
+            db_list_connections,
+            db_save_connection,
+            db_delete_connection,
+            db_test_connection,
+            db_route_preview,
+            db_connect,
+            db_disconnect,
+            db_databases,
+            db_schemas,
+            db_objects,
+            db_completion,
+            db_definition,
+            db_analyze,
+            db_execute,
+            db_cancel,
+            db_close_session,
+            db_table_rows,
+            db_table_design,
+            db_preview_edits,
+            db_apply_edits,
+            db_preview_design,
+            db_apply_design,
+            db_server_info,
+            db_sessions,
+            db_kill,
+            db_cancel_job,
+            db_backup,
+            db_restore,
+            db_csv_preview,
+            db_import_csv,
+            db_export,
+            db_detect,
+            db_redis_databases,
+            db_redis_scan,
+            db_redis_get,
+            db_redis_command,
+            db_redis_info,
+            db_redis_clients,
+            // Tray commands
+            set_close_to_tray,
+            get_close_to_tray,
+            quit_app,
+        ]);
+    }
+
+
+    builder
+        .setup(|app| {
+            use tauri::Manager;
+
+            // Before anything can take a keystroke: a held key must repeat.
+            #[cfg(target_os = "macos")]
+            disable_press_and_hold();
+
+            // Files fetched so they could be dragged to the desktop do not
+            // survive a restart: they were copies made for one gesture, and
+            // left alone they would accumulate at up to two gigabytes each.
+            // Failure is ignored — a temp directory we cannot clear is not a
+            // reason to refuse to start.
+            {
+                let stale = std::env::temp_dir().join("reach-drag");
+                if stale.is_dir() {
+                    let _ = std::fs::remove_dir_all(&stale);
+                }
+            }
+
+            // Root all storage at a writable data dir, then manage AppState here
+            // (not before build) so it picks up that dir.
+            //
+            // Desktop KEEPS its historical `dirs::data_dir()/com.reach.app`
+            // location — the bundle identifier is `com.reach.desktop`, so
+            // `app_data_dir()` would resolve to `.../com.reach.desktop` and make
+            // existing users' vaults look lost. Do NOT relocate them.
+            //
+            // Mobile MUST use the Tauri-resolved OS sandbox: there
+            // `dirs::data_dir()` is read-only, so vault writes fail with
+            // "Read-only file system (os error 30)".
+            #[cfg(not(desktop))]
+            match app.path().app_data_dir() {
+                Ok(dir) => set_app_data_dir(dir),
+                Err(e) => tracing::error!("Failed to resolve app_data_dir: {}", e),
+            }
+            #[cfg(target_os = "android")]
+            let _ = ANDROID_APP.set(app.handle().clone());
+            let data_dir = app_data_dir();
+            let _ = std::fs::create_dir_all(&data_dir);
+            tracing::info!("App data dir: {:?}", data_dir);
+            app.manage(AppState::new());
+
+            // Build application menu (macOS menu bar).
+            //
+            // Copy and Paste differ by platform, and the difference is the
+            // whole of issue #47's second report. On macOS, Cmd+C and Cmd+V
+            // are menu key equivalents: the system looks for a menu item
+            // bound to them and runs its selector, and if no item carries the
+            // native copy:/paste: selector the keystroke does nothing — in
+            // every text field in the app. Cut and Select All were native and
+            // worked; Copy and Paste were custom and did not. So on macOS they
+            // are the predefined items, and the terminal catches the native
+            // paste as a DOM event and routes it through its own confirmation.
+            //
+            // On Windows and Linux the predefined Paste is implemented by
+            // synthesising a Ctrl+V keystroke, which xterm's key handler
+            // already owns, so there the items stay custom and emit an event
+            // the terminal listens for.
+            #[cfg(desktop)]
+            {
+                use tauri::menu::{MenuBuilder, PredefinedMenuItem, SubmenuBuilder};
+                // Only the Windows and Linux edit menu builds its own items.
+                #[cfg(not(target_os = "macos"))]
+                use tauri::menu::MenuItemBuilder;
+                use tauri::Emitter;
+
+                let app_name = "CoreOps";
+
+                // --- CoreOps menu ---
+                let about = PredefinedMenuItem::about(app, Some("About CoreOps"), None)?;
+                let services = PredefinedMenuItem::services(app, None)?;
+                let separator1 = PredefinedMenuItem::separator(app)?;
+                let hide = PredefinedMenuItem::hide(app, Some("Hide CoreOps"))?;
+                let hide_others = PredefinedMenuItem::hide_others(app, None)?;
+                let show_all = PredefinedMenuItem::show_all(app, None)?;
+                let separator2 = PredefinedMenuItem::separator(app)?;
+                let quit = PredefinedMenuItem::quit(app, Some("Quit CoreOps"))?;
+                let reach_menu = SubmenuBuilder::new(app, app_name)
+                    .item(&about)
+                    .item(&services)
+                    .item(&separator1)
+                    .item(&hide)
+                    .item(&hide_others)
+                    .item(&show_all)
+                    .item(&separator2)
+                    .item(&quit)
+                    .build()?;
+
+                // --- File menu ---
+                let file_menu = SubmenuBuilder::new(app, "File")
+                    .item(&PredefinedMenuItem::close_window(app, Some("Close Window"))?)
+                    .build()?;
+
+                // --- Edit menu ---
+                #[cfg(target_os = "macos")]
+                let (copy_item, paste_item) = (
+                    PredefinedMenuItem::copy(app, None)?,
+                    PredefinedMenuItem::paste(app, None)?,
+                );
+                #[cfg(not(target_os = "macos"))]
+                let (copy_item, paste_item) = (
+                    MenuItemBuilder::with_id("copy", "Copy").build(app)?,
+                    MenuItemBuilder::with_id("paste", "Paste").build(app)?,
+                );
+                let cut_item = PredefinedMenuItem::cut(app, None)?;
+                let select_all = PredefinedMenuItem::select_all(app, None)?;
+                let edit_menu = SubmenuBuilder::new(app, "Edit")
+                    .item(&copy_item)
+                    .item(&paste_item)
+                    .item(&cut_item)
+                    .separator()
+                    .item(&select_all)
+                    .build()?;
+
+                // --- View menu ---
+                let view_menu = SubmenuBuilder::new(app, "View")
+                    .item(&PredefinedMenuItem::fullscreen(app, None)?)
+                    .build()?;
+
+                // --- Window menu ---
+                let minimize = PredefinedMenuItem::minimize(app, None)?;
+                let zoom = PredefinedMenuItem::maximize(app, None)?;
+                let window_menu = SubmenuBuilder::new(app, "Window")
+                    .item(&minimize)
+                    .item(&zoom)
+                    .build()?;
+
+                // --- Help menu ---
+                let help_menu = SubmenuBuilder::new(app, "Help")
+                    .build()?;
+
+                let app_menu = MenuBuilder::new(app)
+                    .item(&reach_menu)
+                    .item(&file_menu)
+                    .item(&edit_menu)
+                    .item(&view_menu)
+                    .item(&window_menu)
+                    .item(&help_menu)
+                    .build()?;
+
+                // GTK draws a menu bar inside the window, above Reach's own
+                // title bar: a strip of macOS items (Services, Hide Others)
+                // whose menus did not even open. Reach's title bar and the
+                // terminal's own keys cover everything it offered there.
+                #[cfg(not(target_os = "linux"))]
+                app.set_menu(app_menu)?;
+                #[cfg(target_os = "linux")]
+                drop(app_menu);
+
+                // Route menu-bar Copy/Paste clicks to the webview so the active
+                // terminal can handle them.
+                app.on_menu_event(move |app_handle, event| {
+                    match event.id().as_ref() {
+                        "copy" => {
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.emit("menu-copy", ());
+                            }
+                        }
+                        "paste" => {
+                            if let Some(w) = app_handle.get_webview_window("main") {
+                                let _ = w.emit("menu-paste", ());
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            }
+
+            // Build system tray
+            #[cfg(desktop)]
+            {
+                use tauri::menu::{MenuBuilder, MenuItemBuilder};
+                use tauri::tray::TrayIconBuilder;
+                use tauri::image::Image;
+
+                let show_item = MenuItemBuilder::with_id("show", "Show").build(app)?;
+                let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+                let tray_menu = MenuBuilder::new(app)
+                    .item(&show_item)
+                    .separator()
+                    .item(&quit_item)
+                    .build()?;
+
+                let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))
+                    .expect("failed to load tray icon");
+
+                TrayIconBuilder::new()
+                    .icon(icon)
+                    .tooltip("CoreOps")
+                    .menu(&tray_menu)
+                    .on_menu_event(|app_handle, event| {
+                        match event.id().as_ref() {
+                            "show" => {
+                                if let Some(window) = app_handle.get_webview_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.unminimize();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                            "quit" => {
+                                use tauri::Emitter;
+                                // Route through the frontend so Quit warns about active SSH
+                                // sessions too (same guard as the window close). Fall back to a
+                                // hard exit if the window/frontend can't be reached.
+                                match app_handle.get_webview_window("main") {
+                                    Some(window) => {
+                                        let _ = window.show();
+                                        let _ = window.unminimize();
+                                        let _ = window.set_focus();
+                                        if window.emit("app-quit-requested", ()).is_err() {
+                                            app_handle.exit(0);
+                                        }
+                                    }
+                                    None => app_handle.exit(0),
+                                }
+                            }
+                            _ => {}
+                        }
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
+                            let app_handle = tray.app_handle();
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.unminimize();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    })
+                    .build(app)?;
+            }
+
+            // Prepend tools dir to PATH so installed tools are found
+            {
+                let tools_dir = app_data_dir().join("tools");
+                let _ = std::fs::create_dir_all(&tools_dir);
+                let current_path = std::env::var("PATH").unwrap_or_default();
+                let sep = if cfg!(windows) { ";" } else { ":" };
+                std::env::set_var(
+                    "PATH",
+                    format!("{}{}{}", tools_dir.display(), sep, current_path),
+                );
+                tracing::info!("Tools directory added to PATH: {:?}", tools_dir);
+            }
+
+            // When the computer locks or sleeps, tell the interface, which locks
+            // Reach too if the user asked for that (Settings → Security). A
+            // password manager passphrase kept in memory goes in any case,
+            // whatever that setting says, and any passphrase question still
+            // open is cancelled: nobody is at the keyboard to have typed it.
+            {
+                let handle = app.handle().clone();
+                system_lock::watch(std::sync::Arc::new(move || {
+                    pwmanager::forget_passphrase();
+                    let _ = tauri::Emitter::emit(&handle, "system-locked", ());
+                }));
+            }
+
+            // Synced vaults open and list from an encrypted copy on this device.
+            // Refresh it from Turso once a vault unlocks and every minute after,
+            // and tell the interface when a refresh changed something (someone
+            // edited a shared vault) so it reloads what it shows.
+            {
+                let vaults = app.state::<AppState>().vault_manager.clone();
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut every_minute = tokio::time::interval(std::time::Duration::from_secs(60));
+                    every_minute.tick().await;
+                    loop {
+                        tokio::select! {
+                            _ = every_minute.tick() => {}
+                            _ = vault::cache::refresh_requested() => {}
+                        }
+                        for vault_id in vault::manager::refresh_caches(&vaults).await {
+                            let _ = tauri::Emitter::emit(&handle, "vault-synced", vault_id);
+                        }
+                    }
+                });
+            }
+
+            let handle = app.handle().clone();
+
+            // Clone state arcs for plugin auto-loading
+            let app_state = app.state::<AppState>();
+            let ssh_mgr = app_state.ssh_manager.clone();
+            let tunnel_mgr = app_state.tunnel_manager.clone();
+            let vault_mgr = app_state.vault_manager.clone();
+            let plugin_mgr = app_state.plugin_manager.clone();
+
+            tauri::async_runtime::spawn(async move {
+                let app_data_dir = match handle.path().app_data_dir() {
+                    Ok(dir) => dir,
+                    Err(e) => {
+                        tracing::warn!("Failed to get app data dir: {}", e);
+                        return;
+                    }
+                };
+
+                if let Err(e) = std::fs::create_dir_all(&app_data_dir) {
+                    tracing::warn!("Failed to create app data dir: {}", e);
+                    return;
+                }
+
+                tracing::info!("App data directory ready: {:?}", app_data_dir);
+
+                // Auto-load plugins on startup
+                let saved_configs = {
+                    let vm = vault_mgr.lock().await;
+                    plugin::storage::load_plugin_configs(&vm)
+                        .await
+                        .unwrap_or_default()
+                };
+
+                let config_map: std::collections::HashMap<String, plugin::schema::PluginConfig> =
+                    saved_configs
+                        .into_iter()
+                        .map(|c| (c.id.clone(), c))
+                        .collect();
+
+                let mut pm = plugin_mgr.lock().await;
+                if let Ok(manifests) = pm.discover_plugins() {
+                    for manifest in manifests {
+                        let config =
+                            config_map.get(&manifest.id).cloned().unwrap_or_else(|| {
+                                plugin::schema::PluginConfig {
+                                    id: manifest.id.clone(),
+                                    enabled: true,
+                                    granted_permissions: manifest.permissions.clone(),
+                                    version_at_grant: Some(manifest.version.clone()),
+                                }
+                            });
+                        if config.enabled {
+                            match pm.load_plugin(
+                                &manifest.id,
+                                config,
+                                ssh_mgr.clone(),
+                                tunnel_mgr.clone(),
+                                vault_mgr.clone(),
+                                Some(handle.clone()),
+                            ) {
+                                Ok(info) => {
+                                    tracing::info!(
+                                        "Auto-loaded plugin: {} ({}) [{:?}]",
+                                        info.manifest.name,
+                                        info.manifest.id,
+                                        info.status,
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to auto-load plugin {}: {}",
+                                        manifest.id,
+                                        e,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Editor windows: ALWAYS hide instead of close (prevents WebView2 crash on Windows)
+                if window.label().starts_with("editor") {
+                    api.prevent_close();
+                    #[cfg(desktop)]
+                    let _ = window.hide();
+                }
+                // Main window: the frontend's `onCloseRequested` is the single
+                // owner — it always prevents the close, then either hides to tray
+                // or runs the active-session guard. Acting here too would race it
+                // (e.g. hide the window while the frontend tries to destroy it).
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running CoreOps application");
+}
+
+#[cfg(test)]
+mod metainfo_tests {
+    /// The Linux metadata (software centres, the AppImage catalog) lists the
+    /// version being built, so a release cannot ship with a stale history.
+    #[test]
+    fn metainfo_lists_this_version() {
+        let xml = include_str!("../linux/com.reach.desktop.metainfo.xml");
+        let release = format!("<release version=\"{}\"", env!("CARGO_PKG_VERSION"));
+        assert!(
+            xml.contains(&release),
+            "linux/com.reach.desktop.metainfo.xml has no {release} entry: add this version to <releases>"
+        );
+    }
+}
+
+#[cfg(test)]
+mod log_secret_tests {
+    use std::path::Path;
+
+    /// Argument types that hold a password, a passphrase, a key or a token.
+    const SECRET_TYPES: &[&str] = &[
+        "AuthMethod",
+        "SessionConfig",
+        "ProxyConfig",
+        "JumpHostConfig",
+        "SshOptions",
+        "SecretBox",
+        "SecretString",
+    ];
+    /// Argument names that do.
+    const SECRET_NAMES: &[&str] = &[
+        "password", "passphrase", "token", "secret", "key_content", "private_key", "pin",
+    ];
+
+    fn rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The parameter list of the first fn after `from`, split at top-level commas.
+    fn params(source: &str) -> Vec<(String, String)> {
+        let Some(fn_at) = source.find("fn ") else { return vec![] };
+        let rest = &source[fn_at..];
+        let Some(open) = rest.find('(') else { return vec![] };
+        let (mut depth, mut end) = (0i32, open);
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '(' | '<' | '[' => depth += 1,
+                ')' | '>' | ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (mut parts, mut cur, mut depth) = (Vec::new(), String::new(), 0i32);
+        for c in rest[open + 1..end].chars() {
+            match c {
+                '(' | '<' | '[' => depth += 1,
+                ')' | '>' | ']' => depth -= 1,
+                ',' if depth == 0 => {
+                    parts.push(std::mem::take(&mut cur));
+                    continue;
+                }
+                _ => {}
+            }
+            cur.push(c);
+        }
+        parts.push(cur);
+        parts
+            .iter()
+            .filter_map(|p| {
+                let (name, ty) = p.split_once(':')?;
+                let name = name.trim().trim_start_matches("mut ").trim().to_string();
+                Some((name, ty.trim().to_string()))
+            })
+            .collect()
+    }
+
+    /// Every argument an instrument span keeps is written to reach.log, so an
+    /// argument holding a secret has to be skipped (or the span `skip_all`).
+    /// Logs are what people attach to bug reports.
+    #[test]
+    #[cfg_attr(
+        target_os = "android",
+        ignore = "reads the crate's source, which is not on the device; the desktop runs check the same code"
+    )]
+    fn instrument_spans_never_record_secrets() {
+        let mut files = Vec::new();
+        rust_files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        let mut leaks = Vec::new();
+        for file in files {
+            let source = std::fs::read_to_string(&file).unwrap();
+            for (at, _) in source.match_indices("#[tracing::instrument") {
+                let attr_end = at + source[at..].find(")]").map_or(0, |e| e + 2);
+                let attr = &source[at..attr_end];
+                if attr.contains("skip_all") {
+                    continue;
+                }
+                let skipped: Vec<&str> = attr
+                    .split("skip(")
+                    .nth(1)
+                    .and_then(|s| s.split(')').next())
+                    .map(|s| s.split(',').map(str::trim).collect())
+                    .unwrap_or_default();
+                for (name, ty) in params(&source[attr_end..]) {
+                    if name.contains("self") || skipped.contains(&name.as_str()) {
+                        continue;
+                    }
+                    // An id or a yes/no flag names a secret without holding it.
+                    if name.ends_with("_id") || ty.trim_start_matches("Option<").starts_with("bool") {
+                        continue;
+                    }
+                    let lower = name.to_lowercase();
+                    if SECRET_TYPES.iter().any(|t| ty.contains(t)) || SECRET_NAMES.iter().any(|n| lower.contains(n)) {
+                        let line = source[..at].lines().count() + 1;
+                        leaks.push(format!("{}:{line}: `{name}: {ty}`", file.display()));
+                    }
+                }
+            }
+        }
+        assert!(leaks.is_empty(), "instrument spans that log a secret (add it to skip(...)):\n{}", leaks.join("\n"));
+    }
+}
+
+#[cfg(all(test, desktop))]
+mod purge_logs_tests {
+    use super::purge_logs_with_secrets;
+
+    #[test]
+    fn old_logs_go_once_and_new_ones_stay() {
+        let dir = std::env::temp_dir().join(format!("reach-purge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("reach.log"), "auth_method=Password { password: Some(\"x\") }").unwrap();
+        std::fs::write(dir.join("reach.1.log"), "older").unwrap();
+        std::fs::write(dir.join("other.txt"), "kept").unwrap();
+
+        purge_logs_with_secrets(&dir);
+        assert!(!dir.join("reach.log").exists(), "the old log is deleted");
+        assert!(!dir.join("reach.1.log").exists(), "the rotated old log is deleted");
+        assert!(dir.join("other.txt").exists(), "nothing else in the folder is touched");
+        assert!(dir.join(".secrets-purged").exists(), "the purge is remembered");
+
+        std::fs::write(dir.join("reach.log"), "new").unwrap();
+        purge_logs_with_secrets(&dir);
+        assert!(dir.join("reach.log").exists(), "a log written after the purge is kept");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -1,0 +1,323 @@
+<script lang="ts">
+	import Settings from '#lib/components/settings/Settings.svelte';
+	import NewIndicator from '#lib/components/shared/NewIndicator.svelte';
+	import { settingsHaveNew, newSince } from '#lib/state/whats-new.svelte.js';
+	import { registerSettingsOpener, shortcutLabel } from '#lib/state/shortcuts.svelte.js';
+	import { togglePalette } from '#lib/state/palette.svelte.js';
+	import { getCurrentWindow } from '@tauri-apps/api/window';
+	import { getAISettings } from '#lib/state/ai.svelte.js';
+	import { __APP_VERSION__ } from '#lib/version.js';
+	import { toggleAIPanel, getAIChatState } from '#lib/state/ai-chat.svelte.js';
+	import { t } from '#lib/state/i18n.svelte.js';
+	import { isMac, isMobile } from '#lib/platform.js';
+
+	/** On a Mac the window keeps the system's own traffic lights, drawn over
+	 *  this bar (tauri.macos.conf.json): they are what a Mac user reaches for,
+	 *  and full screen, minimise and zoom behave exactly as in every Mac app.
+	 *  Reach's own buttons are for Windows and Linux. */
+	const macWindow = isMac() && !isMobile();
+
+	let aiSettings = $derived(getAISettings());
+	let aiConfigured = $derived(aiSettings.enabled && !!aiSettings.apiKey && !!aiSettings.selectedModel);
+	let aiPanelOpen = $derived(getAIChatState().panelOpen);
+
+	let settingsOpen = $state(false);
+
+	function openSettings() {
+		settingsOpen = true;
+	}
+
+	function closeSettings() {
+		settingsOpen = false;
+	}
+
+	registerSettingsOpener(openSettings);
+
+	function minimize() {
+		getCurrentWindow().minimize();
+	}
+
+	function toggleMaximize() {
+		getCurrentWindow().toggleMaximize();
+	}
+
+	function close() {
+		getCurrentWindow().close();
+	}
+</script>
+
+<header class="titlebar" class:mac={macWindow} data-tauri-drag-region>
+	<div class="titlebar-left" data-tauri-drag-region>
+		<img src="/app-icon.png" alt="" class="app-icon" draggable="false" />
+		<span class="app-name">CoreOps</span>
+		<span class="app-version">v{__APP_VERSION__}</span>
+		<!-- The gear is the only route to the settings tabs, so a badge on a tab
+		     would only ever be seen by someone already inside. -->
+		<button
+			class="settings-btn"
+			class:has-new={settingsHaveNew()}
+			onclick={openSettings}
+			aria-label={t('titlebar.open_settings')}
+		>
+			{#if settingsHaveNew()}
+				<NewIndicator since={newSince({ kind: 'settings', tab: 'mcp' })} />
+			{/if}
+			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+				<circle cx="12" cy="12" r="3" />
+				<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+			</svg>
+		</button>
+		{#if aiConfigured}
+			<button class="ai-btn" class:ai-active={aiPanelOpen} onclick={toggleAIPanel} aria-label={t('titlebar.ai_assistant')} title={t('titlebar.ai_assistant') + ' (Ctrl+Shift+A)'}>
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M12 2l2.09 6.26L20.18 10l-6.09 1.74L12 18l-2.09-6.26L3.82 10l6.09-1.74L12 2z" />
+					<path d="M20 16l.88 2.64L23.52 20l-2.64.76L20 23.4l-.88-2.64L16.48 20l2.64-.76L20 16z" />
+				</svg>
+			</button>
+		{/if}
+	</div>
+
+	<!-- The command palette's way in, where a search box is looked for; the
+	     shortcut is printed on it so it is learnt. -->
+	<button class="search-pill" onclick={togglePalette} aria-label={t('palette.title')}>
+		<svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+			<circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" />
+			<path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+		</svg>
+		<span class="search-text">{t('palette.search')}</span>
+		<kbd class="search-key">{shortcutLabel('P', { ctrl: true, shift: true })}</kbd>
+	</button>
+
+	{#if !isMobile() && !macWindow}
+	<div class="titlebar-right">
+		<button class="window-btn" onclick={minimize} aria-label={t('titlebar.minimize')}>
+			<svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+				<path d="M1 5h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+			</svg>
+		</button>
+
+		<button class="window-btn" onclick={toggleMaximize} aria-label={t('titlebar.maximize')}>
+			<svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+				<rect x="1" y="1" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.2" />
+			</svg>
+		</button>
+
+		<button class="window-btn window-btn-close" onclick={close} aria-label={t('titlebar.close')}>
+			<svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+				<path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+			</svg>
+		</button>
+	</div>
+	{/if}
+</header>
+
+<Settings open={settingsOpen} onclose={closeSettings} />
+
+<style>
+	.titlebar {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		height: var(--titlebar-h, 38px);
+		min-height: var(--titlebar-h, 38px);
+		padding: 0 12px;
+		background-color: var(--color-bg-secondary);
+		border-bottom: 1px solid var(--color-border);
+		user-select: none;
+		-webkit-app-region: drag;
+	}
+
+	/* Room for the traffic lights, which sit over the bar's left end. */
+	.titlebar.mac {
+		padding-left: 78px;
+	}
+
+	.titlebar {
+		position: relative;
+	}
+
+	/* The search field sits in the middle of the bar, as in an editor or a
+	   browser; on a narrow screen it is a button at the right. */
+	.search-pill {
+		position: absolute;
+		left: 50%;
+		transform: translateX(-50%);
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		width: min(360px, 40vw);
+		height: 26px;
+		padding: 0 var(--space-2) 0 var(--space-3);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-btn);
+		background: var(--color-bg-primary);
+		color: var(--color-text-tertiary);
+		font-family: var(--font-sans);
+		font-size: var(--text-xs);
+		cursor: pointer;
+		-webkit-app-region: no-drag;
+		transition: border-color var(--duration-default) var(--ease-default), color var(--duration-default) var(--ease-default);
+	}
+
+	.search-pill:hover {
+		border-color: var(--color-surface-active);
+		color: var(--color-text-secondary);
+	}
+
+	.search-text {
+		flex: 1;
+		text-align: left;
+	}
+
+	.search-key {
+		padding: 0 5px;
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-sm);
+		font-family: var(--font-mono);
+		font-size: var(--text-2xs);
+	}
+
+	/* No keyboard shortcut to learn on a touch screen. */
+	@media (pointer: coarse) {
+		.search-key {
+			display: none;
+		}
+	}
+
+	@media (max-width: 640px) {
+		.search-pill {
+			position: static;
+			transform: none;
+			width: 32px;
+			height: 32px;
+			margin-left: auto;
+			padding: 0;
+			justify-content: center;
+			border-color: transparent;
+			background: transparent;
+			color: var(--color-text-secondary);
+		}
+
+		.search-text,
+		.search-key {
+			display: none;
+		}
+	}
+
+	.titlebar-left {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.app-icon {
+		width: 18px;
+		height: 18px;
+		-webkit-app-region: no-drag;
+		pointer-events: none;
+	}
+
+	.app-name {
+		font-size: 0.8125rem;
+		font-weight: 600;
+		color: var(--color-text-primary);
+		letter-spacing: 0.02em;
+	}
+
+	.app-version {
+		font-size: 0.6875rem;
+		font-weight: 400;
+		color: var(--color-text-secondary);
+		letter-spacing: 0.01em;
+	}
+
+	/* The gear is small and sits in a busy corner, so it takes the accent
+	   colour as well as the dot. It reverts the moment Settings is opened. */
+	.settings-btn.has-new {
+		color: var(--color-accent);
+	}
+
+	.settings-btn {
+		position: relative;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		border: none;
+		border-radius: var(--radius-btn);
+		background: transparent;
+		color: var(--color-text-secondary);
+		cursor: pointer;
+		-webkit-app-region: no-drag;
+		transition:
+			background-color var(--duration-default) var(--ease-default),
+			color var(--duration-default) var(--ease-default);
+	}
+
+	.settings-btn:hover {
+		background-color: var(--color-surface-hover);
+		color: var(--color-text-primary);
+	}
+
+	.ai-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		border: none;
+		border-radius: var(--radius-btn);
+		background: transparent;
+		color: var(--color-accent);
+		cursor: pointer;
+		-webkit-app-region: no-drag;
+		transition:
+			background-color var(--duration-default) var(--ease-default),
+			color var(--duration-default) var(--ease-default),
+			box-shadow var(--duration-default) var(--ease-default);
+	}
+
+	.ai-btn:hover {
+		background-color: rgba(10, 132, 255, 0.12);
+		color: var(--color-accent);
+	}
+
+	.ai-btn.ai-active {
+		background-color: rgba(10, 132, 255, 0.15);
+		color: var(--color-accent);
+		box-shadow: 0 0 8px rgba(10, 132, 255, 0.25);
+	}
+
+	.titlebar-right {
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		-webkit-app-region: no-drag;
+	}
+
+	.window-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 28px;
+		height: 28px;
+		border: none;
+		border-radius: var(--radius-btn);
+		background: transparent;
+		color: var(--color-text-secondary);
+		cursor: pointer;
+		transition: background-color var(--duration-default) var(--ease-default),
+			color var(--duration-default) var(--ease-default);
+	}
+
+	.window-btn:hover {
+		background-color: var(--color-surface-hover);
+		color: var(--color-text-primary);
+	}
+
+	.window-btn-close:hover {
+		background-color: var(--color-danger);
+		color: #fff;
+	}
+</style>

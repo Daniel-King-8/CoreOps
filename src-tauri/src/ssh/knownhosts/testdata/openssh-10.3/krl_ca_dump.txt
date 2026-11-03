@@ -1,0 +1,35 @@
+# KRL version 7
+# Generated at 20261003T055016
+
+hash: SHA256:a/W+Rtux/NjVxFmiK0CCcmxhJE7pFfSPG9YsqAndPKs # ssh-ed25519
+hash: SHA256:7a13f63d9088dc6eb746e3a98272026d16d393d0c4ac7a872c6737bde5c4a50d
+hash: SHA256:aaa6efbff64efe70dd539fd6d57b669204b37cadc5942fa671b6c82fe12aaa9b
+# hash SHA1:2bff8d687e8e5fd916c28879503c7484a031e102
+
+# CA key ssh-ed25519 SHA256:sN8omCr+pNjMleaIOe+F5VO1PVjA58v79iIOlV6EypQ
+serial: 5
+serial: 100-200
+serial: 300
+serial: 302
+serial: 304
+serial: 306
+serial: 308
+serial: 310
+serial: 312
+serial: 314
+serial: 316
+serial: 318
+serial: 320
+serial: 322
+serial: 324
+serial: 326
+serial: 328
+serial: 330
+serial: 332
+serial: 334
+serial: 336
+serial: 338
+serial: 340
+serial: 9000
+serial: 70000
+id: revoked-id

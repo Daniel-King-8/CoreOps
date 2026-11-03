@@ -1,0 +1,82 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
+  "productName": "CoreOps",
+  "version": "0.8.0",
+  "identifier": "com.reach.desktop",
+  "build": {
+    "frontendDist": "../build",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "CoreOps",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "decorations": false,
+        "transparent": false,
+        "backgroundColor": [10, 10, 10, 255]
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/Daniel-King-8/CoreOps/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlBMTQwQjI3OEZFQURCODgKUldTSTIrcVBKd3NVbWhoZkRnblNiRU9mWVQ1dEZoT21XbUkyVzVkWXdiZ3NUaWtWcDBlVGNBZ3UK"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "publisher": "Daniel-King-8",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2026 Daniel-King-8",
+    "targets": "all",
+    "createUpdaterArtifacts": "v1Compatible",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico"
+      }
+    },
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    },
+    "linux": {
+      "appimage": {
+        "files": {
+          "/usr/share/metainfo/com.reach.desktop.metainfo.xml": "linux/com.reach.desktop.metainfo.xml"
+        }
+      },
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libappindicator3-1"],
+        "files": {
+          "/usr/share/metainfo/com.reach.desktop.metainfo.xml": "linux/com.reach.desktop.metainfo.xml"
+        }
+      },
+      "rpm": {
+        "depends": ["webkit2gtk4.1", "libappindicator-gtk3"],
+        "files": {
+          "/usr/share/metainfo/com.reach.desktop.metainfo.xml": "linux/com.reach.desktop.metainfo.xml"
+        }
+      }
+    }
+  }
+}

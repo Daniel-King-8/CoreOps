@@ -1,0 +1,458 @@
+/**
+ * Tests the WebKit character-loss workaround (issue #47).
+ *
+ * The double below is not a sketch of xterm — the three handlers are
+ * transcribed from @xterm/xterm 5.5.0's own minified source, so the first test
+ * genuinely reproduces the dropped characters and the rest prove the adapter
+ * stops them. If an xterm upgrade changes those handlers, re-transcribe them
+ * here first; a green run against a stale replica would mean nothing.
+ *
+ * Node 24 strips TypeScript types on import, so the module under test is the
+ * exact one the webview loads.
+ *
+ * Run: node scripts/webkit-input-test.mjs
+ */
+
+import { installWebkitInputFix } from '../src/lib/terminal/webkit-input-fix.ts';
+
+let failures = 0;
+const check = (name, cond, extra = '') => {
+	if (cond) console.log(`  PASS  ${name}`);
+	else {
+		failures++;
+		console.log(`  FAIL  ${name}${extra ? '\n        ' + extra : ''}`);
+	}
+};
+const section = (s) => console.log(`\n${s}`);
+
+/**
+ * xterm 5.5.0's real input handling, transcribed from lib/xterm.js.
+ *
+ *   _inputEvent: if (e.data && "insertText" === e.inputType &&
+ *                    (!e.composed || !this._keyDownSeen) && !screenReaderMode)
+ *   _keyDown:    this._keyDownHandled = false; this._keyDownSeen = true; ...
+ *                returns false once the composition helper takes the key,
+ *                which is what keyCode 229 does.
+ *   _keyUp:      this._keyDownSeen = false; this._keyPressHandled = false;
+ */
+const BARE_MODIFIER_KEYS = ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'AltGraph'];
+
+function makeTerminal({ screenReaderMode = false } = {}) {
+	const emitted = [];
+	const core = {
+		_keyDownSeen: false,
+		_keyPressHandled: false,
+		_compositionHelper: {
+			_isComposing: false,
+			_isSendingComposition: false,
+			// xterm's rescue path: snapshots the textarea on a 229 keydown and
+			// emits whatever changed a macrotask later. Modelled here because
+			// the adapter has to suppress it, or a character goes out twice.
+			_handleAnyTextareaChanges() {
+				const before = term.textareaValue;
+				queueMicrotask(() => {
+					const after = term.textareaValue;
+					if (after.length > before.length) emitted.push(after.slice(before.length));
+				});
+			}
+		},
+		_inputEvent(e) {
+			if (
+				e.data &&
+				e.inputType === 'insertText' &&
+				(!e.composed || !this._keyDownSeen) &&
+				!term.options.screenReaderMode
+			) {
+				if (this._keyPressHandled) return false;
+				emitted.push(e.data);
+				return true;
+			}
+			return false;
+		},
+		_keyDown(e) {
+			this._keyDownSeen = true;
+			// CompositionHelper.keydown returns false for keyCode 229, and
+			// _keyDown passes that straight out. It also runs the rescue.
+			if (e.keyCode === 229) {
+				this._compositionHelper._handleAnyTextareaChanges();
+				return false;
+			}
+			// A bare modifier reaches evaluateKeyboardEvent, which yields no
+			// key, so xterm emits nothing and returns true. The flag is still
+			// set, which is the whole problem.
+			if (BARE_MODIFIER_KEYS.includes(e.key)) return true;
+			emitted.push(e.key);
+			return true;
+		},
+		_keyUp() {
+			this._keyDownSeen = false;
+			this._keyPressHandled = false;
+		}
+	};
+
+	const textarea = new EventTarget();
+	const term = { _core: core, textarea, options: { screenReaderMode }, emitted, textareaValue: '' };
+	return term;
+}
+
+const webkit = () => true;
+const chromium = () => false;
+
+/** One keystroke as WebKit delivers it: text first, then keydown(229). */
+function webkitKeystroke(term, ch, { keyup = false, keyCode = 229, mods = {} } = {}) {
+	term._core._inputEvent({ data: ch, inputType: 'insertText', composed: true, isComposing: false });
+	term._core._keyDown({ key: ch, keyCode, isComposing: false, ...mods });
+	if (keyup) {
+		term._core._keyUp({ key: ch });
+		term.textarea.dispatchEvent(new Event('keyup'));
+	}
+}
+
+const type = (term, text, opts) => [...text].forEach((c) => webkitKeystroke(term, c, opts));
+
+// ---------------------------------------------------------------------------
+
+section('the bug itself, against a replica of xterm 5.5.0');
+{
+	const term = makeTerminal();
+	type(term, 'hello');
+	check(
+		'typing fast with no fix loses every character after the first',
+		term.emitted.join('') === 'h',
+		`emitted ${JSON.stringify(term.emitted.join(''))}, expected "h"`
+	);
+
+	const slow = makeTerminal();
+	type(slow, 'hello', { keyup: true });
+	check(
+		'typing slowly was never broken, so the fix has something to match',
+		slow.emitted.join('') === 'hello',
+		`emitted ${JSON.stringify(slow.emitted.join(''))}`
+	);
+}
+
+section('with the adapter installed');
+{
+	const term = makeTerminal();
+	installWebkitInputFix(term, { isWebKitEngine: webkit });
+	type(term, 'hello');
+	check(
+		'every character of fast typing arrives',
+		term.emitted.join('') === 'hello',
+		`emitted ${JSON.stringify(term.emitted.join(''))}`
+	);
+
+	const slow = makeTerminal();
+	installWebkitInputFix(slow, { isWebKitEngine: webkit });
+	type(slow, 'hello', { keyup: true });
+	check(
+		'slow typing still arrives exactly once, not twice',
+		slow.emitted.join('') === 'hello',
+		`emitted ${JSON.stringify(slow.emitted.join(''))}`
+	);
+
+	const long = makeTerminal();
+	installWebkitInputFix(long, { isWebKitEngine: webkit });
+	const burst = 'the quick brown fox jumps over the lazy dog 0123456789';
+	type(long, burst);
+	check('a long burst is neither dropped nor duplicated', long.emitted.join('') === burst);
+}
+
+section('a held modifier must not swallow the character it modifies');
+// Shift+; is ":", which is how vim is put into command mode. WebKit delivers
+// the modifier keydown first, then the text, then keydown(229).
+function shiftedKeystroke(term, ch, { release = true } = {}) {
+	term._core._keyDown({ key: 'Shift', keyCode: 16, shiftKey: true, isComposing: false });
+	term._core._inputEvent({ data: ch, inputType: 'insertText', composed: true, isComposing: false });
+	term._core._keyDown({ key: ch, keyCode: 229, shiftKey: true, isComposing: false });
+	if (release) {
+		term._core._keyUp({ key: ch });
+		term.textarea.dispatchEvent(new Event('keyup'));
+		term._core._keyUp({ key: 'Shift' });
+		term.textarea.dispatchEvent(new Event('keyup'));
+	}
+}
+{
+	const bare = makeTerminal();
+	shiftedKeystroke(bare, ':');
+	check(
+		'without the fix the colon is lost every time, not just when typing fast',
+		bare.emitted.join('') === '',
+		`emitted ${JSON.stringify(bare.emitted.join(''))}`
+	);
+
+	const fixed = makeTerminal();
+	installWebkitInputFix(fixed, { isWebKitEngine: webkit });
+	shiftedKeystroke(fixed, ':');
+	check('with the fix it arrives', fixed.emitted.join('') === ':');
+
+	const once = makeTerminal();
+	installWebkitInputFix(once, { isWebKitEngine: webkit });
+	shiftedKeystroke(once, ':');
+	check('and exactly once, not twice', once.emitted.length === 1, JSON.stringify(once.emitted));
+
+	// Shift stays down across a whole capitalised run.
+	const held = makeTerminal();
+	installWebkitInputFix(held, { isWebKitEngine: webkit });
+	held._core._keyDown({ key: 'Shift', keyCode: 16, shiftKey: true, isComposing: false });
+	for (const ch of 'ABC') {
+		held._core._inputEvent({ data: ch, inputType: 'insertText', composed: true, isComposing: false });
+		held._core._keyDown({ key: ch, keyCode: 229, shiftKey: true, isComposing: false });
+	}
+	check('a held Shift passes a whole run through', held.emitted.join('') === 'ABC',
+		`emitted ${JSON.stringify(held.emitted.join(''))}`);
+
+	for (const key of ['Control', 'Alt', 'Meta', 'CapsLock', 'AltGraph']) {
+		const t = makeTerminal();
+		installWebkitInputFix(t, { isWebKitEngine: webkit });
+		t._core._keyDown({ key, keyCode: 17, isComposing: false });
+		check(`holding ${key} does not gate the text after it`, t._core._keyDownSeen === false);
+	}
+}
+
+section('the modifier is unarmed, not forced open');
+// Upstream's shape (xterm.js #6054): a modifier must not ARM the gate, but if
+// another key genuinely is down the gate still has a job to do.
+{
+	const held = makeTerminal();
+	installWebkitInputFix(held, { isWebKitEngine: webkit });
+	// A real key is down and has not been accounted for.
+	held._core._keyDown({ key: 'a', keyCode: 65, isComposing: false });
+	check('precondition: a real keydown armed the gate', held._core._keyDownSeen === true);
+	held._core._keyDown({ key: 'Shift', keyCode: 16, shiftKey: true, isComposing: false });
+	check(
+		'a modifier pressed on top of it leaves the gate armed',
+		held._core._keyDownSeen === true
+	);
+
+	const clean = makeTerminal();
+	installWebkitInputFix(clean, { isWebKitEngine: webkit });
+	clean._core._keyDown({ key: 'Shift', keyCode: 16, shiftKey: true, isComposing: false });
+	check('a modifier on its own leaves the gate closed', clean._core._keyDownSeen === false);
+}
+
+section('chords that emit from the keydown are still emitted once');
+// These carry a real keyCode and fire no input event, so clearing the flag
+// cannot produce a second delivery. Proving it, rather than asserting it.
+{
+	const ctrlC = makeTerminal();
+	installWebkitInputFix(ctrlC, { isWebKitEngine: webkit });
+	ctrlC._core._keyDown({ key: 'Control', keyCode: 17, ctrlKey: true, isComposing: false });
+	ctrlC._core._keyDown({ key: 'c', keyCode: 67, ctrlKey: true, isComposing: false });
+	check('Ctrl+C emits exactly once', ctrlC.emitted.length === 1, JSON.stringify(ctrlC.emitted));
+
+	const arrow = makeTerminal();
+	installWebkitInputFix(arrow, { isWebKitEngine: webkit });
+	arrow._core._keyDown({ key: 'Shift', keyCode: 16, shiftKey: true, isComposing: false });
+	arrow._core._keyDown({ key: 'ArrowLeft', keyCode: 37, shiftKey: true, isComposing: false });
+	check('Shift+Arrow emits exactly once', arrow.emitted.length === 1, JSON.stringify(arrow.emitted));
+}
+
+section('a modifier is never retired mid-composition');
+{
+	const t = makeTerminal();
+	installWebkitInputFix(t, { isWebKitEngine: webkit });
+	t._core._compositionHelper._isComposing = true;
+	t._core._keyDown({ key: 'Shift', keyCode: 16, shiftKey: true, isComposing: false });
+	check('the gate is left alone while an input method is composing', t._core._keyDownSeen === true);
+}
+
+section('engines that do not have the bug are left alone');
+{
+	const term = makeTerminal();
+	const before = { input: term._core._inputEvent, keyDown: term._core._keyDown };
+	const dispose = installWebkitInputFix(term, { isWebKitEngine: chromium });
+	check(
+		'on Chromium nothing is patched at all',
+		term._core._inputEvent === before.input && term._core._keyDown === before.keyDown
+	);
+	check('and the returned disposer is safe to call', (dispose(), true));
+}
+
+section('never clear the flag on a key that is not accounted for');
+// Each of these would mean clearing _keyDownSeen for a keydown whose character
+// had not already been emitted, which is the gate doing its actual job.
+{
+	const real = makeTerminal();
+	installWebkitInputFix(real, { isWebKitEngine: webkit });
+	real._core._keyDown({ key: 'a', keyCode: 65, isComposing: false });
+	check('a genuine keyboard keydown still marks the key as down', real._core._keyDownSeen === true);
+
+	const mismatch = makeTerminal();
+	installWebkitInputFix(mismatch, { isWebKitEngine: webkit });
+	mismatch._core._inputEvent({ data: 's', inputType: 'insertText', composed: true, isComposing: false });
+	mismatch._core._keyDown({ key: 't', keyCode: 229, isComposing: false });
+	check(
+		'a 229 keydown for a different character is not retired',
+		mismatch._core._keyDownSeen === true
+	);
+
+	for (const mod of ['ctrlKey', 'metaKey', 'altKey']) {
+		const t = makeTerminal();
+		installWebkitInputFix(t, { isWebKitEngine: webkit });
+		webkitKeystroke(t, 's', { mods: { [mod]: true } });
+		check(`a ${mod} chord is not retired`, t._core._keyDownSeen === true);
+	}
+
+	const paste = makeTerminal();
+	installWebkitInputFix(paste, { isWebKitEngine: webkit });
+	paste._core._inputEvent({ data: 'many chars', inputType: 'insertText', composed: true, isComposing: false });
+	paste._core._keyDown({ key: 'many chars', keyCode: 229, isComposing: false });
+	check('multi-character insertion is not treated as one keystroke', paste._core._keyDownSeen === true);
+
+	const reader = makeTerminal({ screenReaderMode: true });
+	installWebkitInputFix(reader, { isWebKitEngine: webkit });
+	webkitKeystroke(reader, 's');
+	check('screen reader mode is left entirely to xterm', reader._core._keyDownSeen === true);
+}
+
+section('never interrupt an input method mid-character');
+// Clearing the gate while a CJK candidate is being composed is how this fix
+// would turn into a worse bug than the one it fixes.
+{
+	const term = makeTerminal();
+	installWebkitInputFix(term, { isWebKitEngine: webkit });
+	term._core._inputEvent({ data: 's', inputType: 'insertText', composed: true, isComposing: false });
+	term._core._compositionHelper._isComposing = true;
+	term._core._keyDown({ key: 's', keyCode: 229, isComposing: false });
+	check('a composition starting mid-keystroke cancels the retire', term._core._keyDownSeen === true);
+
+	const during = makeTerminal();
+	installWebkitInputFix(during, { isWebKitEngine: webkit });
+	during._core._compositionHelper._isComposing = true;
+	webkitKeystroke(during, 's');
+	check('text accepted during composition is never recorded', during._core._keyDownSeen === true);
+
+	const sending = makeTerminal();
+	installWebkitInputFix(sending, { isWebKitEngine: webkit });
+	sending._core._inputEvent({ data: 's', inputType: 'insertText', composed: true, isComposing: false });
+	sending._core._compositionHelper._isSendingComposition = true;
+	sending._core._keyDown({ key: 's', keyCode: 229, isComposing: false });
+	check('a composition being sent also cancels it', sending._core._keyDownSeen === true);
+
+	const started = makeTerminal();
+	installWebkitInputFix(started, { isWebKitEngine: webkit });
+	started._core._inputEvent({ data: 's', inputType: 'insertText', composed: true, isComposing: false });
+	started.textarea.dispatchEvent(new Event('compositionstart'));
+	started._core._keyDown({ key: 's', keyCode: 229, isComposing: false });
+	check('compositionstart on the textarea discards the pending character', started._core._keyDownSeen === true);
+}
+
+section('an on/off switch that works while installed');
+{
+	let on = false;
+	const term = makeTerminal();
+	installWebkitInputFix(term, { isWebKitEngine: webkit, enabled: () => on });
+	type(term, 'hello');
+	check('disabled behaves exactly like no fix', term.emitted.join('') === 'h');
+
+	on = true;
+	term._core._keyUp({});
+	term.emitted.length = 0;
+	type(term, 'hello');
+	check('and re-enabling takes effect immediately', term.emitted.join('') === 'hello');
+}
+
+section("xterm's own rescue must not send the character a second time");
+// upstream xterm.js #6045. Reproduced for real in `npm run webkit:live`, where
+// the unguarded adapter turned "ab" into "abb".
+{
+	const term = makeTerminal();
+	installWebkitInputFix(term, { isWebKitEngine: webkit });
+	for (const ch of 'ab') {
+		term.textareaValue += ch;
+		term._core._inputEvent({ data: ch, inputType: 'insertText', composed: true, isComposing: false });
+		term._core._keyDown({ key: ch, keyCode: 229, isComposing: false });
+	}
+	await Promise.resolve();
+	await Promise.resolve();
+	check(
+		'a character taken by _inputEvent is not also emitted by the rescue',
+		term.emitted.join('') === 'ab',
+		`emitted ${JSON.stringify(term.emitted.join(''))}`
+	);
+
+	// The rescue still has to work when the gate really did reject the text,
+	// which is the case it exists for.
+	// The rescue snapshots at the keydown and compares a tick later, so what it
+	// recovers is text that lands *after* the snapshot. That is the case it
+	// exists for, and suppressing it must not reach this one.
+	const rejected = makeTerminal();
+	installWebkitInputFix(rejected, { isWebKitEngine: webkit });
+	rejected._core._keyDown({ key: 'q', keyCode: 229, isComposing: false });
+	rejected.textareaValue = 'q';
+	await Promise.resolve();
+	await Promise.resolve();
+	check(
+		'the rescue still fires for text no one accepted',
+		rejected.emitted.join('') === 'q',
+		`emitted ${JSON.stringify(rejected.emitted.join(''))}`
+	);
+}
+
+section('refuse to install when the rescue cannot be reached');
+// Letting text through without being able to suppress the rescue would trade
+// dropped characters for doubled ones, which is a worse trade.
+{
+	const term = makeTerminal();
+	delete term._core._compositionHelper._handleAnyTextareaChanges;
+	const before = term._core._inputEvent;
+	let warned = '';
+	const dispose = installWebkitInputFix(term, { isWebKitEngine: webkit, warn: (m) => (warned = m) });
+	check('it warns', warned.includes('deferred textarea diff'), warned);
+	check('and patches nothing at all', term._core._inputEvent === before);
+	check('and its disposer is safe', (dispose(), true));
+}
+
+section('surviving an xterm upgrade');
+// A rename upstream must degrade to today's bug, not to a crash on keystroke.
+{
+	for (const [name, mutate] of [
+		['a renamed _inputEvent', (t) => delete t._core._inputEvent],
+		['a renamed _keyDown', (t) => delete t._core._keyDown],
+		['a renamed _keyDownSeen', (t) => delete t._core._keyDownSeen],
+		['a missing _core', (t) => delete t._core],
+		['a terminal with no textarea', (t) => (t.textarea = null)]
+	]) {
+		const term = makeTerminal();
+		mutate(term);
+		let warned = '';
+		let threw = false;
+		try {
+			const dispose = installWebkitInputFix(term, {
+				isWebKitEngine: webkit,
+				warn: (m) => (warned = m)
+			});
+			dispose();
+		} catch {
+			threw = true;
+		}
+		check(`${name} warns instead of throwing`, !threw && warned.includes('WebKit input fix'), warned);
+	}
+}
+
+section('disposal');
+{
+	const term = makeTerminal();
+	const before = { input: term._core._inputEvent, keyDown: term._core._keyDown };
+	const dispose = installWebkitInputFix(term, { isWebKitEngine: webkit });
+	check('installing replaces the handlers', term._core._inputEvent !== before.input);
+	dispose();
+	check(
+		'disposing puts xterm back exactly as it was',
+		term._core._inputEvent === before.input && term._core._keyDown === before.keyDown
+	);
+
+	const wrapped = makeTerminal();
+	const disposeWrapped = installWebkitInputFix(wrapped, { isWebKitEngine: webkit });
+	const outer = wrapped._core._inputEvent;
+	wrapped._core._inputEvent = function (e) {
+		return outer.call(this, e);
+	};
+	const mine = wrapped._core._inputEvent;
+	disposeWrapped();
+	check('but does not tear off a patch someone else layered on top', wrapped._core._inputEvent === mine);
+}
+
+console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`);
+process.exit(failures === 0 ? 0 : 1);

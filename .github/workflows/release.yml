@@ -1,0 +1,393 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ''
+            os_name: 'Windows'
+          - platform: macos-latest
+            args: '--target aarch64-apple-darwin'
+            os_name: 'macOS_ARM64'
+          - platform: macos-latest
+            args: '--target x86_64-apple-darwin'
+            os_name: 'macOS_Intel'
+          - platform: ubuntu-22.04
+            args: ''
+            os_name: 'Linux'
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libudev-dev libasound2-dev rpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 关键步骤：把 tag 版本号写入三处版本文件。
+      # 否则打包产物仍带着旧的版本号，装完后应用自报旧版本，
+      # 导致「更新成功但重启仍提示更新」的死循环。
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          node scripts/sync-version.mjs "${{ github.ref_name }}"
+
+          echo "--- 同步结果 ---"
+          grep -m1 '"version"' package.json
+          grep -m1 '"version"' src-tauri/tauri.conf.json
+          grep -m1 '^version' src-tauri/Cargo.toml
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NO_STRIP: true
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'CoreOps ${{ github.ref_name }}'
+          releaseBody: |
+            ## CoreOps ${{ github.ref_name }}
+
+            ### 📦 下载指南
+            | 系统 | 文件 |
+            |------|------|
+            | **Windows** | `.exe` 或 `.msi` |
+            | **macOS (Apple Silicon)** | `macOS_ARM64.dmg` |
+            | **macOS (Intel)** | `macOS_Intel.dmg` |
+            | **Linux** | `.deb` / `.rpm` / `.AppImage` |
+            | **Android** | `.apk` |
+          releaseDraft: false
+          prerelease: false
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }}
+
+      - name: Rename artifacts (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+
+          $assets = gh release view ${{ github.ref_name }} --json assets -q '.assets[].name'
+
+          foreach ($asset in $assets -split "`n") {
+            $newName = $asset
+            if ($asset -match "CoreOps.*x64-setup\.exe$") {
+              $newName = "CoreOps_${version}_Windows_x64_Setup.exe"
+            }
+            elseif ($asset -match "CoreOps.*x64-setup\.exe\.sig$") {
+              $newName = "CoreOps_${version}_Windows_x64_Setup.exe.sig"
+            }
+            elseif ($asset -match "CoreOps.*x64-setup\.nsis\.zip$") {
+              $newName = "CoreOps_${version}_Windows_x64_NSIS.zip"
+            }
+            elseif ($asset -match "CoreOps.*x64-setup\.nsis\.zip\.sig$") {
+              $newName = "CoreOps_${version}_Windows_x64_NSIS.zip.sig"
+            }
+            elseif ($asset -match "CoreOps.*x64.*\.msi$") {
+              $newName = "CoreOps_${version}_Windows_x64.msi"
+            }
+            elseif ($asset -match "CoreOps.*x64.*\.msi\.sig$") {
+              $newName = "CoreOps_${version}_Windows_x64.msi.sig"
+            }
+
+            if ($newName -ne $asset) {
+              Write-Host "Renaming: $asset -> $newName"
+              New-Item -ItemType Directory -Force -Path "./tmp_assets" | Out-Null
+              gh release download ${{ github.ref_name }} -p "$asset" -D "./tmp_assets"
+              gh release delete-asset ${{ github.ref_name }} "$asset" --yes
+              Rename-Item "./tmp_assets/$asset" "$newName"
+              gh release upload ${{ github.ref_name }} "./tmp_assets/$newName"
+            }
+          }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rename artifacts (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          OS_NAME="${{ matrix.os_name }}"
+
+          assets=$(gh release view ${{ github.ref_name }} --json assets -q '.assets[].name')
+
+          for asset in $assets; do
+            newName="$asset"
+
+            if [[ "$OS_NAME" == "macOS_ARM64" ]]; then
+              if [[ "$asset" == *"aarch64.dmg" && "$asset" != *".sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_ARM64.dmg"
+              elif [[ "$asset" == *"aarch64.dmg.sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_ARM64.dmg.sig"
+              elif [[ "$asset" == *"aarch64"*".app.tar.gz" && "$asset" != *".sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_ARM64.app.tar.gz"
+              elif [[ "$asset" == *"aarch64"*".app.tar.gz.sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_ARM64.app.tar.gz.sig"
+              fi
+            elif [[ "$OS_NAME" == "macOS_Intel" ]]; then
+              if [[ "$asset" == *"x64.dmg" && "$asset" != *".sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_Intel.dmg"
+              elif [[ "$asset" == *"x64.dmg.sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_Intel.dmg.sig"
+              elif [[ "$asset" == *"x64"*".app.tar.gz" && "$asset" != *".sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_Intel.app.tar.gz"
+              elif [[ "$asset" == *"x64"*".app.tar.gz.sig" ]]; then
+                newName="CoreOps_${VERSION}_macOS_Intel.app.tar.gz.sig"
+              fi
+            fi
+
+            if [ "$newName" != "$asset" ]; then
+              echo "Renaming: $asset -> $newName"
+              mkdir -p ./tmp_assets
+              gh release download ${{ github.ref_name }} -p "$asset" -D "./tmp_assets"
+              gh release delete-asset ${{ github.ref_name }} "$asset" --yes
+              mv "./tmp_assets/$asset" "./tmp_assets/$newName"
+              gh release upload ${{ github.ref_name }} "./tmp_assets/$newName"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rename artifacts (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+
+          assets=$(gh release view ${{ github.ref_name }} --json assets -q '.assets[].name')
+
+          for asset in $assets; do
+            newName="$asset"
+
+            if [[ "$asset" == *".AppImage" && "$asset" != *".sig" && "$asset" != *".tar.gz" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.AppImage"
+            elif [[ "$asset" == *".AppImage.sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.AppImage.sig"
+            elif [[ "$asset" == *".AppImage.tar.gz" && "$asset" != *".sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.AppImage.tar.gz"
+            elif [[ "$asset" == *".AppImage.tar.gz.sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.AppImage.tar.gz.sig"
+            elif [[ "$asset" == *".deb" && "$asset" != *".sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.deb"
+            elif [[ "$asset" == *".deb.sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.deb.sig"
+            elif [[ "$asset" == *".rpm" && "$asset" != *".sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.rpm"
+            elif [[ "$asset" == *".rpm.sig" ]]; then
+              newName="CoreOps_${VERSION}_Linux_x64.rpm.sig"
+            fi
+
+            if [ "$newName" != "$asset" ]; then
+              echo "Renaming: $asset -> $newName"
+              mkdir -p ./tmp_assets
+              gh release download ${{ github.ref_name }} -p "$asset" -D "./tmp_assets"
+              gh release delete-asset ${{ github.ref_name }} "$asset" --yes
+              mv "./tmp_assets/$asset" "./tmp_assets/$newName"
+              gh release upload ${{ github.ref_name }} "./tmp_assets/$newName"
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-release:
+    needs: [build-desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: false
+
+      # 在所有安装包重命名完成后重新生成 latest.json，确保下载 URL 与实际文件名一致
+      - name: Generate correct latest.json after rename
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION_NUM="${VERSION#v}"
+          BASE_URL="https://github.com/Daniel-King-8/CoreOps/releases/download/${{ github.ref_name }}"
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          NOTES=$(gh release view ${{ github.ref_name }} --json body -q '.body' 2>/dev/null || echo "")
+
+          # 下载所有 .sig 签名文件
+          mkdir -p /tmp/sigs
+          gh release download ${{ github.ref_name }} -p "*.sig" -D /tmp/sigs 2>/dev/null || true
+
+          read_sig() {
+            local file="/tmp/sigs/$1"
+            if [ -f "$file" ]; then cat "$file"; else echo ""; fi
+          }
+
+          WIN_NSIS_SIG=$(read_sig "CoreOps_${VERSION_NUM}_Windows_x64_NSIS.zip.sig")
+          MAC_ARM_SIG=$(read_sig "CoreOps_${VERSION_NUM}_macOS_ARM64.app.tar.gz.sig")
+          MAC_INTEL_SIG=$(read_sig "CoreOps_${VERSION_NUM}_macOS_Intel.app.tar.gz.sig")
+          LINUX_APPIMAGE_SIG=$(read_sig "CoreOps_${VERSION_NUM}_Linux_x64.AppImage.tar.gz.sig")
+
+          # 转义 JSON 特殊字符
+          NOTES_ESCAPED=$(echo "$NOTES" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read())[1:-1])")
+
+          cat > latest.json <<EOF
+          {
+            "version": "${VERSION_NUM}",
+            "notes": "${NOTES_ESCAPED}",
+            "pub_date": "${PUB_DATE}",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "${WIN_NSIS_SIG}",
+                "url": "${BASE_URL}/CoreOps_${VERSION_NUM}_Windows_x64_NSIS.zip"
+              },
+              "darwin-aarch64": {
+                "signature": "${MAC_ARM_SIG}",
+                "url": "${BASE_URL}/CoreOps_${VERSION_NUM}_macOS_ARM64.app.tar.gz"
+              },
+              "darwin-x86_64": {
+                "signature": "${MAC_INTEL_SIG}",
+                "url": "${BASE_URL}/CoreOps_${VERSION_NUM}_macOS_Intel.app.tar.gz"
+              },
+              "linux-x86_64": {
+                "signature": "${LINUX_APPIMAGE_SIG}",
+                "url": "${BASE_URL}/CoreOps_${VERSION_NUM}_Linux_x64.AppImage.tar.gz"
+              }
+            }
+          }
+          EOF
+
+          echo "Generated latest.json:"
+          cat latest.json
+          gh release upload ${{ github.ref_name }} latest.json --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-android:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Initialize Android project
+        run: npx tauri android init
+
+      - name: Generate signing keystore
+        run: |
+          keytool -genkey -v \
+            -keystore ${{ runner.temp }}/release.keystore \
+            -alias reach \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass reachapp -keypass reachapp \
+            -dname "CN=Reach,O=Reach,L=Unknown,ST=Unknown,C=US"
+
+      - name: Configure signing in Gradle
+        run: |
+          cat >> src-tauri/gen/android/app/build.gradle.kts << 'GRADLE'
+
+          android {
+              signingConfigs {
+                  create("release") {
+                      storeFile = file("${{ runner.temp }}/release.keystore")
+                      storePassword = "reachapp"
+                      keyAlias = "reach"
+                      keyPassword = "reachapp"
+                  }
+              }
+              buildTypes {
+                  getByName("release") {
+                      signingConfig = signingConfigs.getByName("release")
+                  }
+              }
+          }
+          GRADLE
+
+      - name: Build Android APK
+        run: npx tauri android build --apk
+        env:
+          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+
+      - name: Sign APK with apksigner
+        run: |
+          BUILD_TOOLS=$(ls -d $ANDROID_SDK_ROOT/build-tools/*/ | sort -V | tail -1)
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
+          ${BUILD_TOOLS}apksigner sign \
+            --ks ${{ runner.temp }}/release.keystore \
+            --ks-key-alias reach \
+            --ks-pass pass:reachapp \
+            --key-pass pass:reachapp \
+            "$APK"
+          ${BUILD_TOOLS}apksigner verify "$APK"
+
+      - name: Rename and upload APK
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
+          cp "$APK" "CoreOps_${VERSION}_Android.apk"
+          gh release upload ${{ github.ref_name }} "CoreOps_${VERSION}_Android.apk" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove old APK name
+        run: |
+          gh release delete-asset ${{ github.ref_name }} "app-universal-release.apk" --yes 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

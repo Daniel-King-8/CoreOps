@@ -1,0 +1,19 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "CoreOps",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 14, "y": 12 },
+        "transparent": false,
+        "backgroundColor": [10, 10, 10, 255]
+      }
+    ]
+  }
+}

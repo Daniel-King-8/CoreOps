@@ -1,0 +1,1137 @@
+<script lang="ts">
+	import { untrack } from 'svelte';
+	import { Terminal } from '@xterm/xterm';
+	import { FitAddon } from '@xterm/addon-fit';
+	import { WebglAddon } from '@xterm/addon-webgl';
+	import { WebLinksAddon } from '@xterm/addon-web-links';
+	import { Unicode11Addon } from '@xterm/addon-unicode11';
+	import '@xterm/xterm/css/xterm.css';
+	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+	import { ptyWrite, ptyResize } from '#lib/ipc/pty.js';
+	import { sshSend, sshResize, sshConnect, sshReady, type SshConnectParams } from '#lib/ipc/ssh.js';
+	import { untrustedRefsFromError } from '#lib/ipc/sessions.js';
+	import { registerBufferReader, unregisterBufferReader } from '#lib/state/terminal-buffer.svelte.js';
+	import { themeState } from '#lib/state/theme.svelte.js';
+	import { getSettings, updateSetting } from '#lib/state/settings.svelte.js';
+	import { countPasteLines, shouldWarnOnPaste } from '#lib/terminal/paste.js';
+	import { shouldRearmIme, nudgeCaret, REARM_SETTLE_MS } from '#lib/terminal/ime.js';
+	import { installWebkitInputFix } from '#lib/terminal/webkit-input-fix.js';
+	import { isMobile, isWebKit } from '#lib/platform.js';
+	import { getCurrentWindow } from '@tauri-apps/api/window';
+	import { invoke } from '@tauri-apps/api/core';
+	import { trieMatch } from '#lib/state/snippets.svelte.js';
+	import { terminalFocusRequests } from '#lib/state/palette.svelte.js';
+	import { setTabLink } from '#lib/state/tabs.svelte.js';
+	import { t } from '#lib/state/i18n.svelte.js';
+	import { readText as clipboardReadText, writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
+	import { openUrl } from '@tauri-apps/plugin-opener';
+	import Modal from '#lib/components/shared/Modal.svelte';
+	import MobileKeyBar, { type BarKey } from '#lib/components/shared/MobileKeyBar.svelte';
+	import Button from '#lib/components/shared/Button.svelte';
+
+	interface Props {
+		ptyId: string;
+		type: 'local' | 'ssh';
+		connectionId?: string;
+		/** Has the keyboard. */
+		active: boolean;
+		/** Shown, which in a split (#106) both panes are; only one is active. Active when not given. */
+		visible?: boolean;
+		onTitleChange?: (title: string) => void;
+		sshConnectParams?: SshConnectParams;
+		onReconnected?: (newConnectionId: string) => void;
+		onReady?: () => void;
+	}
+
+	let { ptyId, type: termType, connectionId, active, visible, onTitleChange, sshConnectParams, onReconnected, onReady }: Props = $props();
+	let shown = $derived(visible ?? active);
+
+	// Local state seeded from the `connectionId` prop and overridden in-place on
+	// reconnect (handleReconnect assigns a new UUID and notifies the parent via
+	// onReconnected). Use $effect.pre so the prop value is captured before the
+	// first render — avoids the state_referenced_locally warning that fires when
+	// reading a reactive prop directly inside $state(...).
+	let currentConnectionId = $state<string | undefined>();
+	let disconnected = $state(false);
+	let reconnecting = $state(false);
+
+	$effect.pre(() => {
+		currentConnectionId = connectionId;
+	});
+
+	let containerEl: HTMLDivElement | undefined = $state();
+	let terminal: Terminal | undefined = $state();
+
+	// A phone: the extra-keys bar, and the sticky Ctrl and Alt it holds.
+	const onPhone = isMobile();
+	let barCtrl = $state(false);
+	let barAlt = $state(false);
+
+	/** The font family the terminal draws with, for the one in settings.
+	 *  On a phone, the default `monospace` becomes the JetBrains Mono Reach
+	 *  ships: phones that let the user change the system font (ColorOS, MIUI,
+	 *  One UI) can hand `monospace` a proportional font, whose narrow letters
+	 *  then sit spread out in cells sized for its widest one (#127). */
+	function terminalFont(family: string | undefined): string {
+		const f = family || 'monospace';
+		return onPhone && f === 'monospace' ? '"JetBrains Mono", monospace' : f;
+	}
+
+	/** Make the terminal's text a size larger or smaller, from 8 to 32 px,
+	 *  and keep it for every terminal. */
+	function zoomBy(step: 1 | -1): void {
+		const term = terminal;
+		if (!term || !fitAddon || !containerEl) return;
+		const current = term.options.fontSize ?? 14;
+		const next = Math.min(Math.max(current + step, 8), 32);
+		if (next === current) return;
+		term.options.fontSize = next;
+		term.clearTextureAtlas();
+		safeFitAndResize(term, fitAddon, containerEl);
+		updateSetting('fontSize', next);
+	}
+
+	/** Load a terminal font before xterm measures it. A single name is
+	 *  quoted, as a family may have spaces; a list already is, and quoting
+	 *  the generic `monospace` would name a font called "monospace". */
+	function loadFont(family: string, size: number): Promise<unknown> {
+		const name = family === 'monospace' || family.includes(',') ? family : `"${family}"`;
+		return Promise.all([
+			document.fonts.load(`${size}px ${name}`),
+			document.fonts.load(`bold ${size}px ${name}`)
+		]);
+	}
+
+	/** Apply a sticky Ctrl or Alt from the key bar to text the phone keyboard
+	 *  typed, then let go of them: they apply to one key, as on Termux. */
+	function applyBarModifiers(data: string): string {
+		if (!barCtrl && !barAlt) return data;
+		let out = data;
+		if (barCtrl && data.length === 1) {
+			const c = data.toLowerCase().charCodeAt(0);
+			if (c >= 97 && c <= 122) out = String.fromCharCode(c - 96);
+			else if (data === ' ' || data === '@') out = '\x00';
+			else if ('[\\]^_'.includes(data)) out = String.fromCharCode(data.charCodeAt(0) & 0x1f);
+			else if (data === '?') out = '\x7f';
+		}
+		if (barAlt) out = '\x1b' + out;
+		barCtrl = false;
+		barAlt = false;
+		return out;
+	}
+
+	/** A key from the bar, as the bytes a real keyboard's key would send. */
+	function onBarKey(key: BarKey): void {
+		if (key === 'smaller' || key === 'larger') {
+			zoomBy(key === 'larger' ? 1 : -1);
+			return;
+		}
+		const appCursor = terminal?.modes.applicationCursorKeysMode ?? false;
+		// xterm's modifier parameter: 3 is Alt, 5 is Ctrl, 7 is both.
+		const mod = (barAlt ? 2 : 0) + (barCtrl ? 4 : 0);
+		const cursor = (letter: string): string =>
+			mod ? `\x1b[1;${mod + 1}${letter}` : appCursor ? `\x1bO${letter}` : `\x1b[${letter}`;
+		const tilde = (n: number): string => (mod ? `\x1b[${n};${mod + 1}~` : `\x1b[${n}~`);
+		let seq: string;
+		if (typeof key === 'object') {
+			seq = applyBarModifiers(key.char);
+		} else {
+			switch (key) {
+				case 'esc': seq = '\x1b'; break;
+				case 'tab': seq = barAlt ? '\x1b\t' : '\t'; break;
+				case 'up': seq = cursor('A'); break;
+				case 'down': seq = cursor('B'); break;
+				case 'right': seq = cursor('C'); break;
+				case 'left': seq = cursor('D'); break;
+				case 'home': seq = cursor('H'); break;
+				case 'end': seq = cursor('F'); break;
+				case 'pgup': seq = tilde(5); break;
+				case 'pgdn': seq = tilde(6); break;
+				default: return;
+			}
+			barCtrl = false;
+			barAlt = false;
+		}
+		sendData(Array.from(new TextEncoder().encode(seq)));
+		terminal?.focus();
+	}
+	let fitAddon: FitAddon | undefined = $state();
+
+	// Pending multiline paste awaiting user confirmation (guards against
+	// accidentally executing pasted multi-line commands). Whether it asks
+	// at all, and from how many lines, is the user's to decide — see
+	// #lib/terminal/paste.
+	let pastePreview = $state<string | null>(null);
+	let dontAskAgain = $state(false);
+	let pasteLineCount = $derived(pastePreview ? countPasteLines(pastePreview) : 0);
+
+	/** Copy the current selection to the OS clipboard via the Tauri plugin. */
+	async function copySelection(term: Terminal): Promise<void> {
+		if (!term.hasSelection()) return;
+		try {
+			await clipboardWriteText(term.getSelection());
+		} catch (e) {
+			console.error('Clipboard write failed:', e);
+		}
+		term.clearSelection();
+	}
+
+	/** Read the OS clipboard via the Tauri plugin and paste — single-line goes
+	 *  straight in; multi-line opens a confirmation first. */
+	async function pasteFromClipboard(term: Terminal): Promise<void> {
+		let text = '';
+		try {
+			text = (await clipboardReadText()) ?? '';
+		} catch (e) {
+			console.error('Clipboard read failed:', e);
+			return;
+		}
+		pasteText(term, text);
+	}
+
+	/**
+	 * Paste text the user has produced, wherever it came from: the clipboard
+	 * plugin on Ctrl+V, or the native paste event macOS delivers for Cmd+V
+	 * and Edit → Paste. One entry point, so the multi-line confirmation is
+	 * never bypassed by one of the routes.
+	 */
+	function pasteText(term: Terminal, text: string): void {
+		if (!text) return;
+		const settings = getSettings();
+		const warn = shouldWarnOnPaste(text, {
+			enabled: settings.warnOnMultilinePaste,
+			threshold: settings.multilinePasteThreshold
+		});
+		if (warn) {
+			pastePreview = text;
+		} else {
+			term.paste(text);
+		}
+	}
+
+	/**
+	 * Pasting with "do not ask again" ticked turns the setting off for
+	 * good, not only for this paste. Settings is where it comes back on,
+	 * and the checkbox label says so rather than leaving it to be guessed.
+	 */
+	function confirmPaste(): void {
+		if (dontAskAgain) updateSetting('warnOnMultilinePaste', false);
+		if (pastePreview && terminal) terminal.paste(pastePreview);
+		pastePreview = null;
+		dontAskAgain = false;
+		terminal?.focus();
+	}
+
+	/**
+	 * Give the input method a fresh caret position after the window moved.
+	 *
+	 * A drag changes the window's position but not its layout, so the caret's
+	 * rectangle never changes and nothing new is pushed to the input method —
+	 * which goes on using a position it cached in screen coordinates before
+	 * the window moved (issue #49). A resize does not suffer this because it
+	 * re-lays-out. Moving the caret a pixel and putting it back is what makes
+	 * the position be recomputed. See #lib/terminal/ime for what was measured
+	 * and ruled out, including the blur-and-focus this replaces.
+	 */
+	function rearmIme(): void {
+		const ta = terminal?.textarea;
+		if (!ta) return;
+		if (!shouldRearmIme({ focused: document.activeElement === ta, composing })) return;
+
+		// The thing that actually fixes it, found by the reporter of #49:
+		// clicking another window and back. That is the native window losing
+		// and regaining focus, which makes wry call MoveFocus on the WebView2
+		// controller — and the controller is what holds the stale caret
+		// position. A title-bar drag never produces that, so we do it
+		// deliberately. Two earlier attempts worked at the wrong level: the
+		// DOM textarea's focus, and the caret's rectangle. Neither reaches
+		// the controller.
+		void invoke('webview_refocus').catch(() => {
+			// Not on Windows, or no controller. Nothing is lost by trying.
+		});
+
+		nudgeCaret(ta);
+	}
+
+	function cancelPaste(): void {
+		pastePreview = null;
+		dontAskAgain = false;
+		terminal?.focus();
+	}
+
+	let unlistenData: UnlistenFn | undefined;
+	let unlistenExit: UnlistenFn | undefined;
+	let unlistenMenuCopy: UnlistenFn | undefined;
+	let unlistenMenuPaste: UnlistenFn | undefined;
+	let unlistenMoved: UnlistenFn | undefined;
+	let unlistenResized: UnlistenFn | undefined;
+	let disposeWebkitInputFix: (() => void) | undefined;
+	/** True between compositionstart and compositionend — see #lib/terminal/ime. */
+	let composing = false;
+	let rearmTimer: ReturnType<typeof setTimeout> | undefined;
+	let resizeObserver: ResizeObserver | undefined;
+
+	// Snippet autocomplete (Trie-based, ghost text via xterm Decoration API)
+	let inputBuffer = $state('');
+	let suggestion = $state<{ command: string; name: string; ghost: string } | null>(null);
+	let ghostDecoration: { dispose: () => void } | undefined;
+	let ghostMarker: { dispose: () => void } | undefined;
+
+	let ghostEl: HTMLDivElement | undefined;
+
+	function showGhostDecoration(term: Terminal, ghost: string): void {
+		clearGhostDecoration();
+		if (!term.element) return;
+
+		const cursorX = term.buffer.active.cursorX;
+		const cursorY = term.buffer.active.cursorY - term.buffer.active.viewportY;
+
+		// Get exact cell dimensions and canvas padding from xterm internals
+		let cellW: number, cellH: number, padLeft = 0, padTop = 0;
+		try {
+			const dims = (term as any)._core._renderService.dimensions;
+			cellW = dims.css.cell.width;
+			cellH = dims.css.cell.height;
+			padLeft = dims.css.canvas.left ?? 0;
+			padTop = dims.css.canvas.top ?? 0;
+		} catch {
+			const screen = term.element.querySelector('.xterm-screen');
+			if (!screen) return;
+			cellW = screen.clientWidth / term.cols;
+			cellH = screen.clientHeight / term.rows;
+		}
+
+		const screen = term.element.querySelector('.xterm-screen') as HTMLElement;
+		if (!screen) return;
+
+		const el = document.createElement('div');
+		el.textContent = ghost;
+		el.style.position = 'absolute';
+		el.style.left = `${screen.offsetLeft + padLeft + cursorX * cellW}px`;
+		el.style.top = `${screen.offsetTop + padTop + cursorY * cellH}px`;
+		el.style.height = `${cellH}px`;
+		el.style.lineHeight = `${cellH}px`;
+		el.style.fontSize = `${term.options.fontSize ?? 14}px`;
+		el.style.fontFamily = term.options.fontFamily || 'monospace';
+		el.style.letterSpacing = '0px';
+		// Set from JS, so it never followed the theme; read the token instead.
+		el.style.color = 'var(--color-text-tertiary)';
+		el.style.pointerEvents = 'none';
+		el.style.whiteSpace = 'pre';
+		el.style.zIndex = '10';
+		el.style.overflow = 'visible';
+
+		term.element.appendChild(el);
+		ghostEl = el;
+	}
+
+	function clearGhostDecoration(): void {
+		if (ghostEl) {
+			ghostEl.remove();
+			ghostEl = undefined;
+		}
+	}
+
+	function createTerminal(): Terminal {
+		const appSettings = getSettings();
+		return new Terminal({
+			fontFamily: terminalFont(appSettings.fontFamily),
+			fontSize: appSettings.fontSize ?? 14,
+			cursorBlink: true,
+			cursorStyle: 'bar',
+			scrollback: 10000,
+			allowProposedApi: true,
+			theme: { ...themeState.current.terminal }
+		});
+	}
+
+	// xterm keeps its palette in JS, not CSS, so a theme change has to be pushed
+	// into every live terminal. Without this the terminal kept whatever colours
+	// it was constructed with — which is why it stayed black in light mode.
+	$effect(() => {
+		const palette = themeState.current.terminal;
+		if (terminal) {
+			terminal.options.theme = { ...palette };
+		}
+	});
+
+	function loadAddons(term: Terminal, fit: FitAddon, host: HTMLElement): void {
+		term.loadAddon(fit);
+		// Open links in the OS default browser (Windows/macOS/Linux) via Tauri's
+		// shell, not inside the WebView.
+		term.loadAddon(
+			new WebLinksAddon((_event, uri) => {
+				openUrl(uri).catch((e) => console.error('Failed to open link:', e));
+			})
+		);
+
+		const unicode11 = new Unicode11Addon();
+		term.loadAddon(unicode11);
+		term.unicode.activeVersion = '11';
+
+		attachWebgl(term, host);
+	}
+
+	/**
+	 * The WebGL renderer, with recovery that does not keep the user waiting.
+	 *
+	 * Heavy compositing — the Settings modal's backdrop blur during a theme
+	 * repaint, on some GPUs — can take the WebGL context away. The canvas goes
+	 * blank the instant that happens. The addon's own `onContextLoss` only
+	 * fires after it has waited three seconds for the context to come back,
+	 * and if the driver does hand it back inside that window the addon takes
+	 * its restore path instead, which is the one that can stay blank for good.
+	 * Three seconds of a dead-looking terminal reads as "stuck".
+	 *
+	 * So the `webglcontextlost` DOM event is caught here directly, the moment
+	 * it fires — captured on the container, since it does not bubble — and the
+	 * addon is replaced with a fresh one: new canvas, new context, no wait.
+	 * After two losses in a row the DOM renderer stays; a GPU that keeps
+	 * dropping contexts is not one to keep asking.
+	 */
+	function attachWebgl(term: Terminal, host: HTMLElement, attempt = 0): void {
+		let webgl: WebglAddon;
+		try {
+			// WebKit — WKWebView on macOS, WebKitGTK on Linux — presents a
+			// WebGL canvas one frame behind unless the drawing buffer is
+			// preserved, so a keystroke's echo waits for the next redraw: the
+			// cursor blink, ~600ms later. Measured elsewhere at 528ms → 14ms
+			// from this one flag. Chromium does not need it and pays a small
+			// cost for it, so it stays off on WebView2 (issue #47).
+			webgl = new WebglAddon(isWebKit());
+		} catch {
+			console.warn('[Terminal] WebGL addon unavailable, using the DOM renderer');
+			return;
+		}
+		let replaced = false;
+		const replace = () => {
+			if (replaced) return;
+			replaced = true;
+			host.removeEventListener('webglcontextlost', onLost, true);
+			try {
+				webgl.dispose();
+			} catch {
+				// already gone
+			}
+			if (attempt < 2) attachWebgl(term, host, attempt + 1);
+			try {
+				term.refresh(0, term.rows - 1);
+			} catch {
+				// terminal may have been disposed mid-frame
+			}
+		};
+		const onLost = (e: Event) => {
+			if (e.target instanceof HTMLCanvasElement) replace();
+		};
+		host.addEventListener('webglcontextlost', onLost, true);
+		webgl.onContextLoss(replace);
+		term.loadAddon(webgl);
+	}
+
+	function sendData(data: number[]): void {
+		if (termType === 'ssh' && currentConnectionId) {
+			sshSend(currentConnectionId, data).catch((err) => {
+				console.error('[Terminal] Failed to write to SSH:', err);
+			});
+		} else {
+			ptyWrite(ptyId, data).catch((err) => {
+				console.error('[Terminal] Failed to write to PTY:', err);
+			});
+		}
+	}
+
+	function sendResize(cols: number, rows: number): void {
+		if (termType === 'ssh' && currentConnectionId) {
+			sshResize(currentConnectionId, cols, rows).catch((err) => {
+				console.error('[Terminal] Failed to resize SSH:', err);
+			});
+		} else {
+			ptyResize(ptyId, cols, rows).catch((err) => {
+				console.error('[Terminal] Failed to resize PTY:', err);
+			});
+		}
+	}
+
+	// Fit to container, then push the new geometry to the remote PTY — but only
+	// when the container is actually visible. A hidden tab's wrapper has
+	// display:none, so its container has 0×0 dimensions; FitAddon would clamp
+	// to its 2×1 minimum and resize the remote PTY to a 2-column window,
+	// permanently narrowing any output that arrives while the tab is hidden.
+	function safeFitAndResize(term: Terminal, fit: FitAddon, el: HTMLDivElement): void {
+		if (!term.element) return;
+		if (el.clientWidth === 0 || el.clientHeight === 0) return;
+		const prevCols = term.cols;
+		const prevRows = term.rows;
+		try {
+			fit.fit();
+			if (term.cols !== prevCols || term.rows !== prevRows) {
+				sendResize(term.cols, term.rows);
+			}
+		} catch (err) {
+			console.error('[Terminal] Fit error:', err);
+		}
+	}
+
+	let suggestionTimer: ReturnType<typeof setTimeout> | undefined;
+	let lastCursorX = -1;
+
+	function updateSuggestion(): void {
+		clearTimeout(suggestionTimer);
+		if (inputBuffer.length < 2 || !terminal) {
+			suggestion = null;
+			clearGhostDecoration();
+			return;
+		}
+		const match = trieMatch(inputBuffer);
+		if (match) {
+			const ghost = match.command.slice(inputBuffer.length);
+			suggestion = { command: match.command, name: match.name, ghost };
+			const term = terminal;
+			// Wait for cursor to move (echo arrived) instead of fixed delay
+			lastCursorX = term.buffer.active.cursorX;
+			let attempts = 0;
+			const poll = () => {
+				attempts++;
+				const nowX = term.buffer.active.cursorX;
+				if (nowX !== lastCursorX || attempts > 20) {
+					// Cursor moved = echo arrived, or max 500ms reached
+					clearGhostDecoration();
+					showGhostDecoration(term, ghost);
+				} else {
+					suggestionTimer = setTimeout(poll, 25);
+				}
+			};
+			suggestionTimer = setTimeout(poll, 25);
+		} else {
+			suggestion = null;
+			clearGhostDecoration();
+		}
+	}
+
+	function acceptSuggestion(): boolean {
+		if (!suggestion) return false;
+		const remaining = suggestion.command.slice(inputBuffer.length);
+		if (remaining.length > 0) {
+			const encoded = Array.from(new TextEncoder().encode(remaining));
+			sendData(encoded);
+		}
+		inputBuffer = '';
+		suggestion = null;
+		clearGhostDecoration();
+		return true;
+	}
+
+	function setupInputHandler(term: Terminal): void {
+		// Before anything reads onData: on WebKit, xterm drops characters
+		// outright when typing is fast, so without this the handler below
+		// never sees them (issue #47). No-op on WebView2.
+		disposeWebkitInputFix?.();
+		disposeWebkitInputFix = installWebkitInputFix(term);
+
+		term.onData((data: string) => {
+			data = applyBarModifiers(data);
+			// Track input buffer for snippet autocomplete
+			if (data === '\r' || data === '\n') {
+				inputBuffer = '';
+				suggestion = null;
+				clearGhostDecoration();
+			} else if (data === '\x7f' || data === '\b') {
+				inputBuffer = inputBuffer.slice(0, -1);
+				updateSuggestion();
+			} else if (data === '\x03') {
+				inputBuffer = '';
+				suggestion = null;
+				clearGhostDecoration();
+			} else if (data.length === 1 && data.charCodeAt(0) >= 32) {
+				inputBuffer += data;
+				updateSuggestion();
+			} else {
+				inputBuffer = '';
+				suggestion = null;
+				clearGhostDecoration();
+			}
+
+			const encoded = Array.from(new TextEncoder().encode(data));
+			sendData(encoded);
+		});
+
+		term.onBinary((data: string) => {
+			const bytes = Array.from(data, (c) => c.charCodeAt(0));
+			sendData(bytes);
+		});
+
+		// Ctrl+C copies when text is selected, otherwise sends SIGINT as normal.
+		// Ctrl+V pastes from clipboard.
+		// Tab accepts snippet suggestion.
+		term.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+			if (event.type !== 'keydown') return true;
+
+			// Tab accepts snippet autocomplete
+			if (event.key === 'Tab' && suggestion) {
+				event.preventDefault();
+				acceptSuggestion();
+				return false;
+			}
+
+			// Escape dismisses suggestion
+			if (event.key === 'Escape' && suggestion) {
+				suggestion = null;
+				inputBuffer = '';
+				clearGhostDecoration();
+				return true;
+			}
+
+			if (event.ctrlKey && event.key === 'c' && term.hasSelection()) {
+				void copySelection(term);
+				return false;
+			}
+
+			// macOS: Cmd+C copies the selection (Cmd is never used as a terminal
+			// control key, so this is safe on all platforms).
+			if (event.metaKey && event.key === 'c' && term.hasSelection()) {
+				event.preventDefault();
+				void copySelection(term);
+				return false;
+			}
+
+			if (event.ctrlKey && event.key === 'v') {
+				event.preventDefault();
+				void pasteFromClipboard(term);
+				return false;
+			}
+
+			if (event.metaKey && event.key === 'v') {
+				event.preventDefault();
+				void pasteFromClipboard(term);
+				return false;
+			}
+
+			return true;
+		});
+	}
+
+	async function setupEventListeners(term: Terminal): Promise<void> {
+		const eventId = termType === 'ssh' && currentConnectionId ? currentConnectionId : ptyId;
+		const dataEventName = termType === 'ssh' ? `ssh-data-${eventId}` : `pty-data-${eventId}`;
+		const exitEventName = termType === 'ssh' ? `ssh-exit-${eventId}` : `pty-exit-${eventId}`;
+
+		unlistenData = await listen<number[]>(dataEventName, (event) => {
+			const payload = event.payload;
+			if (payload instanceof Uint8Array) {
+				term.write(payload);
+			} else if (Array.isArray(payload)) {
+				term.write(new Uint8Array(payload));
+			} else if (typeof payload === 'string') {
+				term.write(payload);
+			}
+		});
+
+		unlistenExit = await listen<{ code: number }>(exitEventName, (event) => {
+			const code = event.payload?.code ?? 0;
+			term.write(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`);
+			if (termType === 'ssh') {
+				disconnected = true;
+			}
+		});
+
+		onReady?.();
+
+		// Listeners are attached — tell the SSH backend to flush any buffered
+		// output (motd/banner) emitted before this terminal mounted.
+		if (termType === 'ssh' && currentConnectionId) {
+			sshReady(currentConnectionId).catch(() => {});
+		}
+	}
+
+	async function handleReconnect(): Promise<void> {
+		if (!terminal || !sshConnectParams || reconnecting) return;
+		reconnecting = true;
+		disconnected = false;
+
+		const term = terminal;
+		const newId = crypto.randomUUID();
+
+		try {
+			term.write(`\r\n\x1b[33m[${t('terminal.reconnecting')}]\x1b[0m\r\n`);
+
+			await sshConnect({
+				...sshConnectParams,
+				id: newId,
+				cols: term.cols,
+				rows: term.rows,
+			});
+
+			// Tear down old event listeners
+			unlistenData?.();
+			unlistenExit?.();
+
+			// Switch to new connection
+			currentConnectionId = newId;
+			await setupEventListeners(term);
+
+			term.write(`\r\n\x1b[32m[${t('terminal.reconnected')}]\x1b[0m\r\n`);
+			onReconnected?.(newId);
+		} catch (err) {
+			const reason = untrustedRefsFromError(err) ? t('pwmanager.untrusted_reopen') : String(err);
+			term.write(`\r\n\x1b[31m[${t('terminal.reconnect_failed')}: ${reason}]\x1b[0m\r\n`);
+			disconnected = true;
+		} finally {
+			reconnecting = false;
+		}
+	}
+
+	function setupResizeObserver(term: Terminal, fit: FitAddon, el: HTMLDivElement): void {
+		let resizeTimeout: ReturnType<typeof setTimeout> | undefined;
+
+		resizeObserver = new ResizeObserver(() => {
+			if (resizeTimeout) clearTimeout(resizeTimeout);
+			resizeTimeout = setTimeout(() => safeFitAndResize(term, fit, el), 50);
+		});
+
+		resizeObserver.observe(el);
+	}
+
+	$effect(() => {
+		if (!containerEl) return;
+
+		// The settings are read untracked: as a dependency of this effect, a
+		// new font size (Ctrl+wheel, a pinch, A−/A+) threw the terminal away
+		// and opened an empty one in its place. Size, font and theme changes
+		// reach the open terminal through their own paths instead.
+		const term = untrack(createTerminal);
+		const fit = new FitAddon();
+		loadAddons(term, fit, containerEl);
+
+		// Wait for font to load before opening (canvas needs the font ready)
+		loadFont(term.options.fontFamily ?? 'monospace', term.options.fontSize ?? 14).catch(() => {}).finally(() => {
+			if (!containerEl) return;
+			term.open(containerEl);
+
+			requestAnimationFrame(() => {
+				safeFitAndResize(term, fit, containerEl!);
+			});
+
+			setupInputHandler(term);
+			setupEventListeners(term);
+			setupResizeObserver(term, fit, containerEl);
+
+			// Detect user changes (e.g. sudo su -) via OSC 2 terminal title updates
+			term.onTitleChange((title: string) => {
+				onTitleChange?.(title);
+			});
+
+			// Right-click copies the current selection, or pastes when there's
+			// no selection. (Selection no longer auto-copies — see below.)
+			const termEl = containerEl!;
+			function onContextMenu(e: MouseEvent) {
+				e.preventDefault();
+				if (term.hasSelection()) {
+					void copySelection(term);
+				} else {
+					void pasteFromClipboard(term);
+				}
+			}
+			termEl.addEventListener('contextmenu', onContextMenu);
+
+			// On macOS, Cmd+V and Edit → Paste arrive as the native paste: the
+			// menu item runs the paste: selector and WebKit fires a DOM paste
+			// event on the focused element, which is xterm's hidden textarea.
+			// xterm would insert the text on its own, skipping the multi-line
+			// confirmation, so it is caught first — capture phase, on the
+			// textarea itself — and routed through the same path as Ctrl+V.
+			function onNativePaste(e: ClipboardEvent) {
+				const text = e.clipboardData?.getData('text/plain') ?? '';
+				e.preventDefault();
+				e.stopImmediatePropagation();
+				pasteText(term, text);
+			}
+			term.textarea?.addEventListener('paste', onNativePaste, { capture: true });
+
+			// Whether a character is part-way through being composed decides
+			// whether the window-move handler below may touch focus at all.
+			function onCompositionStart() { composing = true; }
+			function onCompositionEnd() { composing = false; }
+			term.textarea?.addEventListener('compositionstart', onCompositionStart);
+			term.textarea?.addEventListener('compositionend', onCompositionEnd);
+
+			// Moving the window emits a stream of events; the interesting moment
+			// is when it stops, which is when the user let go of the title bar.
+			getCurrentWindow()
+				.onMoved(() => {
+					clearTimeout(rearmTimer);
+					rearmTimer = setTimeout(rearmIme, REARM_SETTLE_MS);
+				})
+				.then((fn) => { unlistenMoved = fn; })
+				.catch(() => {
+					// No Tauri window (browser preview) — nothing to re-arm.
+				});
+			// Resizing by a bottom or right edge leaves the window where it was,
+			// so no move arrives, yet the candidate window is left just as
+			// misplaced, and the same click away and back puts it right (#104).
+			getCurrentWindow()
+				.onResized(() => {
+					clearTimeout(rearmTimer);
+					rearmTimer = setTimeout(rearmIme, REARM_SETTLE_MS);
+				})
+				.then((fn) => { unlistenResized = fn; })
+				.catch(() => {});
+
+			// Ctrl+Wheel zooms terminal font size
+			function onWheel(e: WheelEvent) {
+				if (!e.ctrlKey) return;
+				e.preventDefault();
+				zoomBy(e.deltaY < 0 ? 1 : -1);
+			}
+			termEl.addEventListener('wheel', onWheel, { passive: false });
+
+			// So does a pinch, on a phone with no wheel (#127): a step each
+			// time the fingers' distance grows or shrinks by a tenth. Two
+			// fingers are taken from the page, which would zoom as a whole.
+			let pinchFrom = 0;
+			const spread = (e: TouchEvent): number =>
+				Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+			termEl.addEventListener('touchstart', (e) => {
+				if (e.touches.length === 2) pinchFrom = spread(e);
+			}, { passive: true });
+			termEl.addEventListener('touchmove', (e) => {
+				if (e.touches.length !== 2 || !pinchFrom) return;
+				e.preventDefault();
+				const ratio = spread(e) / pinchFrom;
+				if (ratio > 1.1 || ratio < 1 / 1.1) {
+					zoomBy(ratio > 1 ? 1 : -1);
+					pinchFrom = spread(e);
+				}
+			}, { passive: false });
+			termEl.addEventListener('touchend', (e) => {
+				if (e.touches.length < 2) pinchFrom = 0;
+			}, { passive: true });
+
+			// Listen for menu-bar Copy/Paste events (Rust emits these when the
+			// user clicks Edit > Copy / Paste since the menu items have no
+			// keyboard accelerators — Cmd+C / Cmd+V are handled by xterm's
+			// attachCustomKeyEventHandler below).
+			listen('menu-copy', () => {
+				if (term.hasSelection()) void copySelection(term);
+			}).then((fn) => { unlistenMenuCopy = fn; });
+			listen('menu-paste', () => {
+				void pasteFromClipboard(term);
+			}).then((fn) => { unlistenMenuPaste = fn; });
+
+			// Note: selection deliberately does NOT auto-copy. Copy is explicit
+			// via Ctrl+C (with a selection) or right-click — so drag-selecting
+			// never clobbers the clipboard. (xterm has no copy-on-select here.)
+
+			terminal = term;
+			fitAddon = fit;
+
+			const bufferId = termType === 'ssh' && currentConnectionId ? currentConnectionId : ptyId;
+			registerBufferReader(bufferId, {
+				size: () => ({ cols: term.cols, rows: term.rows }),
+				read: (startLine?: number, maxLines?: number) => {
+					const buf = term.buffer.active;
+					const start = startLine ?? Math.max(0, buf.length - (maxLines ?? 50));
+					const end = maxLines && startLine != null ? Math.min(buf.length, start + maxLines) : buf.length;
+					const lines: string[] = [];
+					for (let i = start; i < end; i++) {
+						const line = buf.getLine(i);
+						if (line) lines.push(line.translateToString(true));
+					}
+					return lines.join('\n').trim();
+				},
+				lineCount: () => term.buffer.active.length
+			});
+		});
+
+		return () => {
+			const bufferId = termType === 'ssh' && currentConnectionId ? currentConnectionId : ptyId;
+			unregisterBufferReader(bufferId);
+			unlistenData?.();
+			unlistenExit?.();
+			unlistenMenuCopy?.();
+			unlistenMenuPaste?.();
+			unlistenMoved?.();
+			unlistenResized?.();
+			disposeWebkitInputFix?.();
+			disposeWebkitInputFix = undefined;
+			clearTimeout(rearmTimer);
+			resizeObserver?.disconnect();
+			term.dispose();
+			terminal = undefined;
+			fitAddon = undefined;
+		};
+	});
+
+	// Live font family updates from settings
+	const appSettings = getSettings();
+	$effect(() => {
+		const term = terminal;
+		const fit = fitAddon;
+		const el = containerEl;
+		if (!term || !fit || !el || !appSettings.fontFamily) return;
+		const family = terminalFont(appSettings.fontFamily);
+		if (term.options.fontFamily === family) return;
+
+		loadFont(family, term.options.fontSize ?? 14).catch(() => {}).finally(() => {
+			term.options.fontFamily = family;
+			term.clearTextureAtlas();
+			safeFitAndResize(term, fit, el);
+		});
+	});
+
+	// And the size, as one terminal's zoom (or a synced vault) sets it for
+	// all; the terminal zoomed has it already. A hidden tab is fitted when
+	// it is shown again.
+	$effect(() => {
+		const size = appSettings.fontSize;
+		const term = terminal;
+		const fit = fitAddon;
+		const el = containerEl;
+		if (!term || !fit || !el || !size || term.options.fontSize === size) return;
+		term.options.fontSize = size;
+		term.clearTextureAtlas();
+		safeFitAndResize(term, fit, el);
+	});
+
+	// Auto-focus xterm AND re-fit when this tab becomes active (Ctrl+Tab, click, sidebar switch).
+	// Focus: xterm needs an explicit `focus()` call — toggling `display: none` → `display: block`
+	// doesn't make the inner textarea capture keystrokes on its own. Three focus timings
+	// defeat races with click handlers and Tauri WebView2 layout-not-ready quirks.
+	// Re-fit: while the tab was hidden, the container measured 0×0 so the ResizeObserver
+	// could not track window/sidebar resizes. We re-fit on the next frame (after layout)
+	// instead of waiting for the observer's 50ms debounce — keeps the switch feeling instant.
+	// In a split both panes are shown and fitted; only the active one takes
+	// the keyboard, so clicking the other pane is what moves it.
+	$effect(() => {
+		if (!shown || !terminal) return;
+		const term = terminal;
+		const fit = fitAddon;
+		const el = containerEl;
+		const takeKeys = active;
+		const focusNow = () => {
+			if (!takeKeys) return;
+			try {
+				term.focus();
+			} catch {
+				// Terminal may have been disposed mid-frame
+			}
+		};
+		focusNow();
+		requestAnimationFrame(() => {
+			if (fit && el) safeFitAndResize(term, fit, el);
+			focusNow();
+			queueMicrotask(focusNow);
+		});
+	});
+
+	// The tab shows whether this SSH session is still connected.
+	$effect(() => {
+		if (termType !== 'ssh') return;
+		setTabLink(ptyId, reconnecting ? 'reconnecting' : disconnected ? 'down' : undefined);
+	});
+
+	// The command palette typed into this terminal: it takes the keyboard back.
+	$effect(() => {
+		if (terminalFocusRequests() === 0 || !active || !shown) return;
+		untrack(() => terminal?.focus());
+	});
+
+</script>
+
+<div
+	class="terminal-wrapper"
+	style:display={shown ? 'flex' : 'none'}
+	style:--term-bg={themeState.current.terminal.background}
+>
+	<div bind:this={containerEl} class="terminal-container"></div>
+	{#if onPhone && !disconnected}
+		<MobileKeyBar bind:ctrl={barCtrl} bind:alt={barAlt} zoom onkey={onBarKey} />
+	{/if}
+	{#if disconnected && termType === 'ssh'}
+		<div class="reconnect-overlay">
+			<div class="reconnect-card">
+				<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M2.5 2v6h6" />
+					<path d="M2.5 8a10 10 0 0 1 17.13-4" />
+					<path d="M21.5 22v-6h-6" />
+					<path d="M21.5 16a10 10 0 0 1-17.13 4" />
+				</svg>
+				<span class="reconnect-text">{t('terminal.connection_lost')}</span>
+				<button class="reconnect-btn" onclick={handleReconnect} disabled={reconnecting}>
+					{reconnecting ? t('terminal.reconnecting') : t('terminal.reconnect')}
+				</button>
+			</div>
+		</div>
+	{/if}
+</div>
+
+<Modal
+	open={pastePreview !== null}
+	onclose={cancelPaste}
+	title={t('terminal.paste_confirm_title')}
+	maxWidth="560px"
+>
+	<p class="paste-msg">{t('terminal.paste_confirm_message', { lines: String(pasteLineCount) })}</p>
+	<pre class="paste-preview">{pastePreview}</pre>
+
+	<label class="paste-dont-ask">
+		<input type="checkbox" bind:checked={dontAskAgain} />
+		<span>{t('terminal.paste_dont_ask')}</span>
+	</label>
+
+	{#snippet actions()}
+		<Button variant="secondary" onclick={cancelPaste}>{t('common.cancel')}</Button>
+		<Button variant="primary" onclick={confirmPaste}>{t('terminal.paste_confirm_action')}</Button>
+	{/snippet}
+</Modal>
+
+<style>
+	.paste-dont-ask {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 12px;
+		font-size: 0.8125rem;
+		color: var(--color-text-secondary);
+		cursor: pointer;
+		user-select: none;
+	}
+
+	.paste-dont-ask input {
+		accent-color: var(--color-accent);
+		margin: 0;
+		cursor: pointer;
+	}
+
+	.paste-msg {
+		margin: 0 0 10px;
+		font-size: 0.875rem;
+		line-height: 1.5;
+		color: var(--color-text-primary);
+	}
+
+	.paste-preview {
+		margin: 0;
+		max-height: 220px;
+		overflow: auto;
+		padding: 10px 12px;
+		font-family: var(--font-mono, monospace);
+		font-size: 0.75rem;
+		line-height: 1.5;
+		white-space: pre;
+		color: var(--color-text-secondary);
+		background: var(--color-bg-primary);
+		border: 1px solid var(--color-border);
+		border-radius: var(--radius-btn);
+	}
+
+	.terminal-wrapper {
+		flex-direction: column;
+		width: 100%;
+		height: 100%;
+		background: var(--bg-primary, var(--color-bg-primary));
+		position: relative;
+	}
+
+	/* Takes what the key bar leaves, on a phone; all of it elsewhere. */
+	.terminal-container {
+		width: 100%;
+		flex: 1;
+		min-height: 0;
+	}
+
+
+	/* Painted with the terminal's own background: the padding and the strip
+	   left below the last whole row showed xterm.css's black viewport, a
+	   black frame around a light theme (#105). */
+	.terminal-container {
+		background: var(--term-bg);
+	}
+
+	.terminal-container :global(.xterm) {
+		height: 100%;
+		/* Room between the text and the sidebar and window edges, as a terminal
+		   app gives it; the fit addon takes the padding off the grid it sizes. */
+		padding: 8px 12px;
+	}
+
+	/* A phone keeps every column it can. */
+	@media (max-width: 640px) {
+		.terminal-container :global(.xterm) {
+			padding: 4px;
+		}
+	}
+
+	.terminal-container :global(.xterm-viewport) {
+		background-color: var(--term-bg);
+	}
+
+	.terminal-container :global(.xterm-viewport::-webkit-scrollbar) {
+		width: 6px;
+	}
+
+	.terminal-container :global(.xterm-viewport::-webkit-scrollbar-track) {
+		background: transparent;
+	}
+
+	.terminal-container :global(.xterm-viewport::-webkit-scrollbar-thumb) {
+		background-color: var(--color-surface-strong);
+		border-radius: 3px;
+	}
+
+	.terminal-container :global(.xterm-viewport::-webkit-scrollbar-thumb:hover) {
+		background-color: var(--color-surface-strong);
+	}
+
+	.reconnect-overlay {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--color-surface-sunken);
+		backdrop-filter: blur(4px);
+		z-index: 20;
+	}
+
+	.reconnect-card {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 12px;
+		padding: 24px 32px;
+		border-radius: 12px;
+		background: rgba(30, 30, 30, 0.95);
+		border: 1px solid var(--color-border);
+		color: var(--color-text-secondary, #a1a1a6);
+	}
+
+	.reconnect-card svg {
+		opacity: 0.6;
+	}
+
+	.reconnect-text {
+		font-size: 0.85rem;
+		font-weight: 500;
+	}
+
+	.reconnect-btn {
+		padding: 6px 20px;
+		border-radius: 6px;
+		border: none;
+		background: var(--color-accent, var(--color-accent));
+		color: #fff;
+		font-size: 0.8rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: opacity 0.15s;
+	}
+
+	.reconnect-btn:hover:not(:disabled) {
+		opacity: 0.85;
+	}
+
+	.reconnect-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+</style>

@@ -1,0 +1,53 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "37 20 * * 2"
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+      packages: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Nothing is built: CodeQL reads Rust, TypeScript/Svelte and the
+        # workflows straight from the source.
+        language: [actions, javascript-typescript, rust]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          # Vendored and generated code is not ours to fix.
+          config: |
+            paths-ignore:
+              - src-tauri/vendor
+              - src-tauri/gen
+              - node_modules
+              - docs/node_modules
+              # Test-only: fixed keys, salts and passwords on purpose (known
+              # answers, test vaults). Unit tests live in *_tests.rs files.
+              - src-tauri/src/**/*_tests.rs
+              # Modules whose tests sit in a tests.rs beside them.
+              - src-tauri/src/**/tests.rs
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
