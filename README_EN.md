@@ -13,206 +13,370 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/based_on-Reach-0a84ff?style=flat-square" alt="Based on Reach" />
-  <img src="https://img.shields.io/badge/version-0.8.0-brightgreen?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/based_on-Reach%200.8.8-0a84ff?style=flat-square" alt="Based on Reach 0.8.8" />
+  <img src="https://img.shields.io/badge/version-0.8.1-brightgreen?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-333?style=flat-square" alt="Platforms" />
   <img src="https://img.shields.io/badge/AI-DeepSeek%20%7C%20Qwen%20%7C%20OpenAI-blueviolet?style=flat-square" alt="AI Support" />
 </p>
 
 ---
 
-## Why Fork Reach?
+## What is CoreOps
 
-I've been a loyal user of **Reach** ever since I discovered it. It became the most-opened tool in my daily ops work — no Electron bloat, no monthly subscriptions, a clean interface, and a native Rust + russh SSH implementation that delivers both performance and stability.
+CoreOps is a cross-platform SSH client and remote operations tool, forked from [Reach](https://github.com/alexandrosnt/Reach) 0.8.8.
 
-After using it for a while, two pain points pushed me to roll up my sleeves:
+It keeps the full Reach foundation — native Rust SSH, SFTP, RDP/VNC, port forwarding, Ansible, OpenTofu, containers, Kubernetes, databases, and an encrypted vault — and adds two things for Chinese-speaking operations engineers:
 
-**1. Language barrier:** Reach is English-only. For someone like me who thinks in Chinese, having all confirmations and error messages in English during high-pressure incidents (say, a 3 AM server alert) adds unnecessary cognitive load. I wanted the interface to speak my native language.
+1. **A complete Chinese interface**: menus, prompts, error messages, confirmations, and the AI panel.
+2. **An enhanced AI operations assistant**: read the terminal, analyse it, generate commands, and inject them into the live terminal. It supports four execution modes, per-tab conversation contexts, and a gate for sudo and interactive prompts.
 
-**2. Missing AI workflow:** My workflow increasingly relies on AI assistance — spot an error, paste it to AI, get a fix, verify and run. The original Reach AI module only offers basic command suggestions; it lacks the complete loop of "read terminal context → AI analysis → inject command with one click." I was constantly copy-pasting between the terminal and an AI chat window.
-
-So I built **CoreOps** — keeping every bit of Reach's SSH engine intact, while layering my own workflow customizations on top.
-
----
-
-## What's Changed vs. Reach
-
-### ① Full Chinese Localization
-
-Completed and thoroughly proofread the Chinese language pack (`zh.json`), covering every piece of UI text:
-
-- All menus, buttons, and tooltips
-- Error messages and confirmation dialogs
-- All newly added AI panel text (human-translated, not machine-generated)
-
-The entire app can now be switched to Chinese in Settings, with the same reading quality as the original English.
+No Electron, no subscription, no account. Windows, macOS, Linux, and Android share one codebase.
 
 ---
 
-### ② Chinese AI Operations Assistant Sidebar (Key Addition)
+## Features
 
-This is the core addition in CoreOps — an AI chat panel on the right side of the terminal, purpose-built for ops workflows.
+### 1. AI Operations Assistant (CoreOps enhancement)
 
-**The problem it solves:**
+The AI panel sits beside the terminal and works with the current session, not as a detached chat window.
 
-> Before: Spot error → manually copy → open browser / paste to AI tool → read solution → manually copy command → switch back to terminal → paste and run
->
-> After: Spot error → AI panel auto-reads the terminal → ask in one line → inject AI's command into the terminal with one click
+- **Reads the live terminal**: the recent terminal output is included automatically, so errors do not need to be copied by hand.
+- **Runs code blocks**: shell commands in an AI reply can be injected into the current terminal with one click.
+- **Run all commands**: when a reply contains several commands, execute them in order as one batch.
+- **SSH / local PTY routing**: automatically uses `sshSend` or `ptyWrite` based on the active tab.
+- **Per-tab context**: each tab keeps its own conversation, so switching tabs does not mix histories; closing a tab clears it.
+- **Abort**: stop a response or an execution at any time.
+- **Resizable panel**: drag the panel edge; the width is remembered.
+- **sudo and interactive-command gate**: when a command asks for a sudo password, a confirmation, `[y/N]`, or Enter, execution pauses and a dialog waits for your input.
+- **Dangerous-command detection**: in Auto Edit mode, service restarts, deletions, package management, disk operations, and firewall changes require confirmation first.
 
-**Feature overview:**
+#### Four execution modes
 
-| Feature | Description |
-|---------|-------------|
-| Terminal buffer awareness | AI can automatically read the current terminal content — no manual copy needed |
-| Streaming output | AI replies appear word-by-word in real time |
-| One-click code execution | Shell commands in AI replies can be injected into the terminal with a single click |
-| SSH / local PTY routing | Automatically routes to `sshSend` or `ptyWrite` based on the active tab type |
-| Draggable panel width | Panel width is resizable and persists across restarts |
-| Interrupt generation | Stop AI generation at any time |
+| Mode | Behaviour |
+|------|-----------|
+| **Normal** | The AI can read the terminal and analyse it; commands run only when you click Run |
+| **Plan only** | Analysis and plans only; no command can be executed |
+| **Auto edit** | The AI may edit configuration files; high-risk commands still ask first |
+| **Full auto** | The AI reads, executes, analyses, and continues automatically — use only in controlled environments |
 
-**Four execution modes (ordered by trust level):**
+The selected mode is stored locally and survives restarts.
 
-```
-Chat only     →  Conversation only, AI never touches the terminal
-Plan only     →  AI provides commands and a plan; you decide what to run
-Assisted      →  AI extracts commands, each requiring your manual confirmation before injection
-Full auto     →  AI injects and runs commands automatically (high risk — use with caution)
-```
+#### AI configuration
 
-Mode preference is saved locally and survives restarts.
-
----
-
-### ③ AI Settings Panel
-
-A dedicated **AI Configuration** tab has been added to Settings:
-
-- **Any OpenAI-compatible API**: DeepSeek, Qwen, local Ollama, SiliconFlow, and more — just change the base URL
-- **Encrypted API Key storage**: Keys are encrypted via the built-in Vault, never written in plain text
-- **Dynamic model list fetching**: Enter your API endpoint and fetch available models with one click; supports search filtering
-- **Model info display**: Shows context window size and pricing (cost per million tokens)
+- **Any OpenAI-compatible API**: DeepSeek, Qwen, SiliconFlow, local Ollama, OpenAI, and others.
+- **Encrypted API key**: stored in the application vault, never written to a plain-text config file.
+- **Model discovery**: fetch the available models from the configured endpoint, with search and filtering.
+- **Model details**: context window and price per million tokens.
+- **Base-URL handling**: with or without `/v1` both work; DeepSeek's `reasoning_content` is read correctly.
+- **Restores after restart**: the key is loaded automatically once the vault is unlocked.
 
 ---
 
-### ④ Session List Drag-and-Drop Rewrite
+### 2. Connections and Terminals
 
-The original Reach had compatibility issues with HTML5 native drag-and-drop on Windows (Tauri WebView2). I rewrote it entirely using the Pointer Events API:
-
-- **Reorder within a folder**: Drag up/down freely; drop position snaps precisely (upper half = insert before, lower half = insert after)
-- **Move across folders**: Drag onto a folder header to move the session into it — works even with collapsed folders
-- **Move to root**: Drag to an empty area to remove a session from its folder
-- **Smooth animations**: Powered by Svelte `animate:flip`; surrounding cards glide out of the way
-
----
-
-## Everything Inherited from Reach (Unchanged)
-
-The following features are carried over **without a single line of modification**:
-
-- **SSH Terminal**: Multi-tab, split pane, WebGL rendering, full xterm.js support
-- **SFTP File Browser**: Drag-and-drop upload/download, in-app editing, transfer queue
-- **Port Tunneling**: Local / remote / dynamic SOCKS forwarding, saved per session
-- **Jump Hosts (ProxyJump)**: Multi-hop SSH, with `~/.ssh/config` import support
-- **System Monitoring**: Live CPU / memory / disk metrics from remote hosts, no agent required
-- **Ansible Workspace**: Playbook, inventory, and role management with streaming execution output
-- **OpenTofu / Terraform**: Plan / Apply / Destroy, state browsing, full IaC workspace
-- **Serial Console**: COM/TTY access for routers, switches, and embedded devices
-- **Encrypted Vault**: Session credentials, SSH keys, and secrets encrypted at rest with cloud sync support
-- **Lua Plugin System**: Sandboxed Lua scripting for extensibility
+- **SSH terminal**: tabs, split panes, tab groups, and WebGL rendering with xterm.js.
+- **Your `~/.ssh/config`, all of it**: ProxyJump, ProxyCommand, ControlMaster, Kerberos (GSSAPI), X11 forwarding, PKCS#11 and FIDO2 keys, and the other keywords — 104 in total.
+- **Jump hosts / multi-hop SSH**: imported from ssh_config or configured in the session editor.
+- **OpenSSH-style authentication chain**: key → ssh-agent → password.
+- **Host-key verification**: fingerprint confirmation on first use, and a clear warning when a known host presents a different key.
+- **Reconnect**: dropped SSH tabs show their state and can reconnect with one click.
+- **RDP and VNC**: remote desktops in a tab; RDP shares the clipboard, files, and a local folder as a drive.
+- **WSL sessions**: open a WSL distribution in a tab on Windows, with user selection.
+- **Local shells**: open a local terminal, optionally running a specific program (for example a container shell).
+- **Serial console**: COM/TTY access for routers, switches, and embedded devices.
+- **Terminal clipboard**: right-click to copy or paste, confirmation before multi-line paste, links open in the system browser.
+- **Terminal colours follow the theme**, in dark and light modes.
+- **Command palette**: `Ctrl+Shift+P` reaches sessions, tabs, pages, snippets, and actions.
+- **Quick Connect**: type `user@host:port` and connect.
+- **Start screen**: recent sessions, Quick Connect, and a local shell when no tab is open.
 
 ---
 
-## Tech Stack
+### 3. File Transfer and SFTP
+
+- **SFTP explorer**: multi-tab browsing, path navigation, and permission display.
+- **Drag and drop**: upload files by dropping them in, download by dragging them out.
+- **Folder upload**: send a whole directory, including subfolders, as one transfer with one progress bar.
+- **Edit in place**: open a remote file in the CodeMirror editor and save it back.
+- **Compress and extract on the server**: no local download required.
+- **Transfer queue**: progress, cancel, and retry.
+- **Symlinks**: shown with a link icon and their real target; no meaningless size.
+- **Real error messages**: download, delete, rename, new file, and new folder failures show the server's own error instead of failing silently.
+- **Download integrity**: a dropped connection or a stalled server fails the download instead of leaving a truncated file that looks complete.
+
+---
+
+### 4. Networking and Tunnels
+
+- **Local port forwarding**: map a remote port onto this machine.
+- **Remote forwarding**: through `RemoteForward` in ssh_config.
+- **Dynamic SOCKS proxy**: create one from the Tunnels panel and route it through the current SSH session.
+- **Tunnels are saved with the session** and restored on reconnect.
+- **ssh_config forwards**: LocalForward, RemoteForward, and DynamicForward are recognised automatically.
+- **Proxy settings**: HTTP/SOCKS proxies can be combined with jump hosts.
+
+---
+
+### 5. Monitoring, Logs, and Audit
+
+- **Live server statistics**: CPU, memory, disk, network, and logged-in users, with no agent installed.
+- **Status bar**: connection state, latency, and disconnect/reconnect notices.
+- **Session logging**: write terminal output to plain-text files.
+- **Log redaction**: hosts, accounts, IPs, session names, and other private values are replaced when logs are shared or a report is generated.
+- **Audit trail**: dangerous commands are flagged; AI-driven executions leave their command and output in the conversation.
+
+---
+
+### 6. Automation and DevOps (opt-in, in Settings → DevOps)
+
+#### Ansible
+
+- Playbooks, inventory, and role management.
+- Streaming execution output with live task progress.
+- On Windows, Ansible runs through WSL; it can also run in a container or on a remote Linux host.
+- Built-in playbook templates and inventory generation.
+
+#### OpenTofu / Terraform
+
+- Full Plan / Apply / Destroy workflow.
+- State browsing and resource inspection.
+- HCL editor with variables, modules, providers, outputs, and locals.
+- Visual resource and data-source pickers.
+- State encryption, version management, and toolchain installation.
+- Supports both OpenTofu and Terraform.
+
+#### Containers and Kubernetes
+
+- Manage Docker, Podman, and Compose.
+- Container list, start/stop/remove, logs, file browser, and exec.
+- Read file-based logs inside containers (glog, log4j, nginx, and others), including rotation.
+- Kubernetes: pods, workloads, events, YAML, logs, and namespace switching.
+- Helm support.
+- Container and Kubernetes actions use the existing SSH session; no local kubectl is required.
+
+#### Databases
+
+- PostgreSQL, MySQL, MariaDB, SQL Server, SQLite, and Redis.
+- Data grid, schema browsing, and a schema-aware SQL editor.
+- The table designer shows the `ALTER` statement before it runs.
+- Risk-scaled confirmations for destructive operations.
+- Connect directly or through an SSH tunnel.
+- Database backup and read-only mode.
+- Send query results to the AI for analysis.
+
+#### Recipes
+
+- Parameterised scripts with declared parameters and a risk level.
+- Built-in and imported recipes.
+- Risk checks before execution.
+- A reusable button for routine operations.
+
+---
+
+### 7. Security and Credentials
+
+- **Encrypted vault**: sessions, passwords, SSH keys, and secrets are encrypted at rest.
+- **Cryptography**: XChaCha20-Poly1305, Argon2id, and X25519.
+- **Master password**: optional; unlock with Windows Hello, Touch ID, Android biometrics, or a FIDO2 security key.
+- **Auto-lock**: locks when idle or when the system locks.
+- **Encrypted cloud sync**: optional sync through Turso/libSQL across devices.
+- **Shared vaults**: member invitations and shared sessions/folders.
+- **Backup and restore**: encrypted, optionally password-protected backups.
+- **Password managers**: Passbolt integration keeps the password out of CoreOps and fetches it only when connecting.
+- **Zero-trust defaults**: features that open a door, such as session sharing and the MCP server, stay off until enabled.
+- **Host-key verification**: trust on first use and a loud warning when a key changes.
+- **Secret redaction**: passwords, tokens, private keys, and sync tokens are kept out of logs.
+
+---
+
+### 8. Collaboration and MCP
+
+- **Session sharing**: two terminals side by side, peer-to-peer and end-to-end encrypted; the owner decides whether the guest can type.
+- **MCP server**: hand the current session to Claude Code, Cursor, or any MCP client.
+  - Listens on loopback only by default.
+  - Guards against blind writes and secret reads.
+  - Off by default and enabled manually.
+- **Team members**: shared vaults support invitations and permissions.
+
+---
+
+### 9. Interface, Themes, and Plugins
+
+- **Theme system**: built-in dark and light themes, plus third-party themes from the marketplace.
+- **Whole-app theming**: title bar, sidebar, tab bar, panels, buttons, and status bar follow the theme, not only the terminal.
+- **Terminal colours follow the theme**.
+- **Design system**: consistent type scale, spacing, radii, shadows, and colour tokens.
+- **Interface zoom**: `Ctrl+=` / `Ctrl+-` scales the whole window, `Ctrl+0` resets; terminal font size is separate.
+- **Collapsible sidebar**, draggable width, and a drawer layout on phones.
+- **Lua plugins**: sandboxed scripts, a plugin marketplace, and permission declarations.
+- **Nine languages**: Chinese, English, German, Spanish, French, Italian, Greek, Bulgarian, and Russian.
+- **Language picker** with search.
+- **Mobile layout**: Esc/Ctrl/Alt/arrow keys above the keyboard, pinch to zoom, and safe areas for notches, status bars, and the keyboard.
+
+---
+
+### 10. Platforms, Updates, and Migration
+
+- **Platforms**: Windows, macOS (Apple Silicon / Intel), Linux, and Android.
+- **Installers**: Windows `.exe` / `.msi`, macOS `.dmg`, Linux `.AppImage` / `.deb` / `.rpm`, Android `.apk`.
+- **Updates**: signed desktop updates; Android checks the GitHub release for an APK.
+- **Upgrades keep your data**: the data directory remains `com.reach.app`, so sessions, vault, and settings survive.
+- **Import**:
+  - Bulk-import sessions from `~/.ssh/config`.
+  - Bulk-import RDP hosts from a Termix export or JSON.
+  - Import sessions, folders, and shared vaults.
+- **Backup and restore**: full backup and restore.
+- **About page**: version, project links, and a manual update check.
+
+---
+
+## What CoreOps changes vs upstream Reach
+
+> Some of these were later adopted by upstream Reach (for example, session drag-and-drop and the theme system). CoreOps 0.8.0 continues to focus on the **enhanced AI assistant** and the **Chinese experience**.
+
+### 1. Complete Chinese interface
+
+The Chinese locale covers menus, buttons, prompts, errors, confirmations, and the AI panel.
+
+### 2. Chinese AI operations assistant (the core change)
+
+The AI panel turns “read the terminal → analyse → inject the command” into one loop, with four execution modes, per-tab contexts, a sudo/input gate, and run-all.
+
+### 3. AI configuration panel
+
+A dedicated AI tab in Settings: custom API base URL, encrypted key storage, model discovery, context window, and pricing.
+
+### 4. Session drag-and-drop
+
+CoreOps once rewrote session reordering with Pointer Events to work around HTML5 drag-and-drop problems in Tauri WebView2 on Windows; upstream later adopted this.
+
+---
+
+## Inherited from Reach 0.8.8
+
+Everything below comes from upstream Reach 0.8.8:
+
+- SSH terminals, split panes, tab groups, and WebGL rendering
+- RDP / VNC remote desktops
+- SFTP explorer, folder upload, and in-place editing
+- Port forwarding, SOCKS proxies, and jump hosts
+- System monitoring and session logging
+- Command palette, start screen, and Quick Connect
+- WSL, local shells, and serial console
+- Ansible and OpenTofu / Terraform
+- Containers, Kubernetes, and databases
+- Encrypted vault, cloud sync, and shared vaults
+- Password managers (Passbolt)
+- Session sharing and the MCP server
+- Themes, the theme marketplace, and Lua plugins
+- Nine languages and the mobile layout
+- Auto-update, backup/restore, and host-key verification
+
+---
+
+## Tech stack
 
 | Layer | Technology |
 |-------|------------|
-| Desktop framework | Tauri v2 |
+| Desktop shell | Tauri v2 |
 | Backend | Rust · Tokio · russh (native SSH, no OpenSSH dependency) |
-| Frontend | Svelte 5 (Runes mode) · SvelteKit · TypeScript |
+| Frontend | Svelte 5 (runes) · SvelteKit · TypeScript |
 | Styling | Tailwind CSS v4 · CSS custom properties |
-| Terminal rendering | xterm.js + WebGL |
-| Encryption | XChaCha20-Poly1305 · Argon2id · X25519 |
-| Data storage | SQLite (libsql) |
+| Terminal | xterm.js with WebGL |
+| Cryptography | XChaCha20-Poly1305 · Argon2id · X25519 |
+| Storage | SQLite (libsql) |
 
 ---
 
-## Building from Source
+## Download and install
 
-Requirements: [Rust](https://rustup.rs), [Node.js 22+](https://nodejs.org), and [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
+Download from GitHub Releases:
+
+```text
+https://github.com/Daniel-King-8/CoreOps/releases
+```
+
+- Windows: `.exe` or `.msi`
+- macOS: `.dmg` (Apple Silicon / Intel)
+- Linux: `.AppImage` / `.deb` / `.rpm`
+- Android: `.apk`
+
+> Installing a new version replaces the old one. Sessions, the vault, and settings live in the `com.reach.app` data directory and are not removed.
+
+---
+
+## Build from source
+
+Requirements: [Rust 1.99+](https://rustup.rs), [Node.js 22.17+](https://nodejs.org), and the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 
 ```bash
-# Clone the repository
 git clone https://github.com/Daniel-King-8/CoreOps.git
 cd CoreOps
 
-# Install frontend dependencies
 npm install
-
-# Development mode (Vite + Tauri together)
-npm run tauri dev
-
-# Production build
-npm run tauri build
-
-# Clear Rust build cache (if version shows wrong or artifacts are stale)
-rm -rf src-tauri/target/debug/.fingerprint/coreops* src-tauri/target/debug/coreops*
-npm run tauri dev
+npm run tauri dev      # development
+npm run tauri build    # production installers
 ```
 
-### Configuring the AI Assistant
+### Configure the AI assistant
 
-1. Open the app → Settings → **AI Configuration**
-2. Enter your API base URL (defaults to `https://api.deepseek.com/v1`; any OpenAI-compatible endpoint works)
-3. Enter your API Key and click "Verify & Fetch Models"
-4. Select a model and enable the AI toggle
-5. Click the AI icon in the top-right corner of the terminal to open the sidebar
-
----
-
-## Acknowledgements
-
-A big thank you to **[@alexandrosnt](https://github.com/alexandrosnt)** for building the excellent open-source project Reach. Every bit of CoreOps's SSH capability comes from Reach — this project is simply standing on the shoulders of a giant and adding a few personal touches.
-
-**Original project: [https://github.com/alexandrosnt/Reach](https://github.com/alexandrosnt/Reach)**
+1. Open the app → Settings → **AI**.
+2. Enter the API base URL (the default is `https://api.deepseek.com/v1`; any OpenAI-compatible endpoint works).
+3. Enter the API key and click **Validate and fetch models**.
+4. Pick a model and enable the AI switch.
+5. Click the AI icon at the top right of the terminal to open the panel.
 
 ---
-
-## A Note from the Author
-
-Honestly, I'm not a particularly skilled programmer. This project inevitably has its share of shortcomings and bugs, and I sincerely ask for your patience and understanding.
-
-The motivation behind CoreOps is simple: **make my own daily work a little smoother, and hopefully help others with similar needs along the way.** If it turns out to be useful to even a handful of people, that's more than enough for me.
-
-If you run into a bug, have a feature suggestion, or just want to chat, feel free to reach out:
-
-📮 **Email: [1007887927@qq.com](mailto:1007887927@qq.com)**
-
-I read every message carefully. Thank you for your support — it genuinely means a lot!
 
 ## Changelog
+
+### v0.8.1
+
+- Fixed session drag-and-drop reordering; the order is remembered on this device
+- The session list now uses "session groups" throughout: group heading, search, and create button
+- "Private (this device)" is now "Default session group"
+- Session groups have a right-click menu with Rename and Delete
+- Added "Move session" to the session context menu, to move a session to another session group
+- Folders can be renamed from their context menu
+- Version set to 0.8.1
 
 ### v0.8.0
 
 Rebased on upstream Reach v0.8.8 while keeping every CoreOps customization.
 
-- New base: the full Reach 0.8.8 codebase with all upstream features and fixes
-- Upstream additions: RDP/VNC tabs, command palette, split view and tab groups, WSL sessions, container/Kubernetes/database workspaces, password-manager integration, theme marketplace, host-key verification, folder upload, and more
-- Kept the enhanced CoreOps AI assistant: Normal / Plan Only / Auto Edit / Full Auto modes
+- New base: ported from Reach 0.8.8, with all upstream features and fixes
+- Upstream additions: RDP/VNC tabs, command palette, split view and tab groups, WSL sessions, container/Kubernetes/database workspaces, password-manager integration, theme marketplace, host-key verification, file and folder upload, and more
+- Kept the enhanced CoreOps AI assistant: Normal / Plan Only / Auto Edit / Full Auto
 - Kept per-tab AI conversations with cleanup on tab close
 - Kept the interactive-command gate for sudo prompts and confirmations
 - Kept custom OpenAI-compatible API base URLs (DeepSeek, Qwen, SiliconFlow, Ollama, ...)
 - Kept model discovery, context/pricing display, and automatic `/v1` handling
 - Kept run-all/multi-command execution, abort, and resizable panel width
+- Version set to 0.8.0; the update feed remains CoreOps' own GitHub release
 
-### v0.4.18:
+### Older releases
 
-Interactive command execution support
-
-- AI now detects sudo password prompts automatically during command execution
-- Pauses execution and waits for user input when password/confirmation is required
-- Resumes command execution after user provides the required input
+See [CHANGELOG.md](CHANGELOG.md) for earlier changes.
 
 ---
 
-> CoreOps is a personal fork customized for my own ops workflow and does not represent the official Reach project in any way.  
-> If you're looking for a solid SSH client, the original Reach is absolutely worth checking out too.
+## Acknowledgements
+
+Thanks to **[@alexandrosnt](https://github.com/alexandrosnt)** for creating Reach. All of CoreOps' SSH capabilities come from Reach; this project only adds a personal layer on top.
+
+**Upstream project: [https://github.com/alexandrosnt/Reach](https://github.com/alexandrosnt/Reach)**
+
+---
+
+## Final notes
+
+I am not a professional programmer, so this project will have rough edges and bugs. Thank you for your patience.
+
+The goal is simple: make my own operations work smoother, and hopefully help others with similar needs.
+
+If you find a bug, have a suggestion, or just want to talk, contact me:
+
+📮 **Email: [1007887927@qq.com](mailto:1007887927@qq.com)**
+
+> CoreOps is a personal fork tailored to my own operations workflow and does not represent the official Reach project.
+> If you are looking for an SSH client, the original Reach is absolutely worth checking out.

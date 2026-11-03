@@ -32,7 +32,7 @@
 	import Button from '#lib/components/shared/Button.svelte';
 	import UntrustedRefsDialog from '#lib/components/pwmanager/UntrustedRefsDialog.svelte';
 	import { sessionUntrustedSecretRefs, sessionApproveSecretRefs, untrustedRefsFromError, type UntrustedRefs } from '#lib/ipc/sessions.js';
-	import { sessionKind, sessionGet, sessionList, sessionDelete, sessionUpdate, sessionListFolders, sessionCreateFolder, sessionUpdateFolderParent, sessionDeleteFolder, sessionMoveToFolder, type SessionConfig, type Folder } from '#lib/ipc/sessions.js';
+	import { sessionKind, sessionGet, sessionList, sessionDelete, sessionUpdate, sessionListFolders, sessionCreateFolder, sessionUpdateFolderParent, sessionRenameFolder, sessionDeleteFolder, sessionMoveToFolder, sessionMoveToVault, type SessionConfig, type Folder } from '#lib/ipc/sessions.js';
 	import { setActivePage } from '#lib/state/navigation.svelte.js';
 	import { sshConnect, sshDisconnect, sshDetectOs, type JumpHostConnectParams } from '#lib/ipc/ssh.js';
 	// Passwords are now stored encrypted in vault, not in memory cache
@@ -182,6 +182,9 @@
 	let creatingFolder = $state(false);
 	let creatingFolderParentId = $state<string | null>(null);
 	let newFolderName = $state('');
+	let renamingFolder = $state<Folder | undefined>();
+	let renameFolderName = $state('');
+	let renamingFolderBusy = $state(false);
 
 	// Filter sessions by selected vault, then by search query
 	let filteredSessions = $derived.by(() => {
@@ -240,6 +243,9 @@
 	let moveIds_ = $state<string[] | null>(null);
 	let moveFilter = $state('');
 	let moveTarget = $state<string | null | undefined>(undefined);
+	let moveVaultSession = $state<SessionConfig | undefined>();
+	let moveVaultTarget = $state<string | null | undefined>(undefined);
+	let movingVault = $state(false);
 	let moveNewName = $state('');
 	const NEW_FOLDER = '__new__';
 	let moveFolders = $derived(
@@ -307,6 +313,41 @@
 		moveFilter = '';
 		moveTarget = undefined;
 		moveNewName = '';
+	}
+
+	function openMoveVault(session: SessionConfig): void {
+		closeContextMenu();
+		moveVaultSession = session;
+		moveVaultTarget = undefined;
+	}
+
+	let moveVaultTargets = $derived.by(() => {
+		const current = moveVaultSession?.vault_id ?? null;
+		const targets: { id: string | null; name: string }[] = vaultState.vaultList
+			.filter((vault) => !vault.name.startsWith('__') && vault.id !== current)
+			.map((vault) => ({ id: vault.id, name: vault.name }));
+		if (current !== null) {
+			targets.unshift({ id: null, name: t('session.default_group') });
+		}
+		return targets;
+	});
+
+	async function confirmMoveVault(): Promise<void> {
+		const session = moveVaultSession;
+		if (!session || moveVaultTarget === undefined) return;
+		const target = moveVaultTarget;
+		movingVault = true;
+		try {
+			await sessionMoveToVault(session.id, target);
+			const groupName = target === null ? t('session.default_group') : (vaultState.vaults.get(target)?.name ?? '');
+			await loadSessions();
+			addToast(t('session.moved_to_group', { group: groupName }), 'success');
+			moveVaultSession = undefined;
+		} catch (err) {
+			addToast(String(err), 'error');
+		} finally {
+			movingVault = false;
+		}
 	}
 
 	async function confirmMove(): Promise<void> {
@@ -448,39 +489,111 @@
 	// Drag & drop via pointer events (HTML5 DnD doesn't work in Tauri WebView2 on Windows)
 	let dragSession = $state<SessionConfig | undefined>();
 	let dropTarget = $state<string | null | undefined>();
+	let dropSessionId = $state<string | undefined>();
+	let dropSessionAfter = $state(false);
 	let dragging = $state(false);
 
+	function resetDragState(): void {
+		dragSession = undefined;
+		dropTarget = undefined;
+		dropSessionId = undefined;
+		dropSessionAfter = false;
+		dragging = false;
+	}
+
+	/** Put `dragged` before or after `targetId`, and into that session's folder. */
+	async function reorderSession(dragged: SessionConfig, targetId: string, after: boolean): Promise<void> {
+		const from = sessions.findIndex((session) => session.id === dragged.id);
+		const targetIdx = sessions.findIndex((session) => session.id === targetId);
+		if (from === -1 || targetIdx === -1 || from === targetIdx) return;
+
+		const targetFolder = sessions[targetIdx].folder_id ?? null;
+		const folderChanged = (dragged.folder_id ?? null) !== targetFolder;
+
+		const next = [...sessions];
+		const [moved] = next.splice(from, 1);
+		moved.folder_id = targetFolder;
+
+		let insertAt = next.findIndex((session) => session.id === targetId);
+		if (insertAt === -1) return;
+		if (after) insertAt += 1;
+		next.splice(insertAt, 0, moved);
+
+		sessions = next;
+		saveSessionOrder(next.map((session) => session.id));
+
+		if (folderChanged) {
+			try {
+				await sessionMoveToFolder([moved.id], targetFolder);
+			} catch (err) {
+				addToast(String(err), 'error');
+				await loadSessions();
+			}
+		}
+	}
+
 	function handleDragStart(e: PointerEvent, session: SessionConfig): void {
+		e.preventDefault();
 		dragSession = session;
 		dragging = true;
+		dropTarget = undefined;
+		dropSessionId = undefined;
+		dropSessionAfter = false;
+
+		const cleanup = () => {
+			window.removeEventListener('pointermove', onMove);
+			window.removeEventListener('pointerup', onUp);
+			window.removeEventListener('pointercancel', onCancel);
+		};
 		const onMove = (me: PointerEvent) => {
 			if (!dragSession) return;
-			// Find drop target by checking which folder header we're over
 			dropTarget = undefined;
+			dropSessionId = undefined;
+
 			const el = document.elementFromPoint(me.clientX, me.clientY);
-			if (el) {
-				const folderEl = el.closest('[data-folder-id]') as HTMLElement | null;
-				if (folderEl) {
-					dropTarget = folderEl.dataset.folderId === '__ungrouped__' ? null : folderEl.dataset.folderId!;
-				} else {
-					dropTarget = undefined;
-				}
+			if (!el) return;
+
+			// Over another session: reorder (and change folder if they differ).
+			const card = el.closest('[data-session-id]') as HTMLElement | null;
+			const cardId = card?.dataset.sessionId;
+			if (cardId && cardId !== dragSession.id) {
+				const rect = card.getBoundingClientRect();
+				dropSessionId = cardId;
+				dropSessionAfter = me.clientY > rect.top + rect.height / 2;
+				return;
+			}
+
+			// Over a folder header or the root area: move into that folder.
+			const folderEl = el.closest('[data-folder-id]') as HTMLElement | null;
+			if (folderEl) {
+				dropTarget = folderEl.dataset.folderId === '__ungrouped__' ? null : folderEl.dataset.folderId!;
 			}
 		};
 		const onUp = async () => {
-			window.removeEventListener('pointermove', onMove);
-			window.removeEventListener('pointerup', onUp);
+			cleanup();
 			const session = dragSession;
-			const target = dropTarget;
-			dragSession = undefined;
-			dropTarget = undefined;
-			dragging = false;
-			if (session && target !== undefined && (selected.has(session.id) || session.folder_id !== target)) {
-				await moveIds(targetsOf(session), target);
+			const targetSessionId = dropSessionId;
+			const after = dropSessionAfter;
+			const targetFolder = dropTarget;
+			resetDragState();
+			if (!session) return;
+
+			if (targetSessionId) {
+				await reorderSession(session, targetSessionId, after);
+				return;
+			}
+			if (targetFolder !== undefined && (selected.has(session.id) || session.folder_id !== targetFolder)) {
+				await moveIds(targetsOf(session), targetFolder);
 			}
 		};
+		const onCancel = () => {
+			cleanup();
+			resetDragState();
+		};
+
 		window.addEventListener('pointermove', onMove);
 		window.addEventListener('pointerup', onUp);
+		window.addEventListener('pointercancel', onCancel);
 	}
 
 	// Right-click context menu
@@ -501,6 +614,28 @@
 		e.preventDefault();
 		e.stopPropagation();
 		contextMenu = { x: e.clientX, y: e.clientY, folder };
+	}
+
+	function openRenameFolder(folder: Folder): void {
+		closeContextMenu();
+		renamingFolder = folder;
+		renameFolderName = folder.name;
+	}
+
+	async function confirmRenameFolder(): Promise<void> {
+		const folder = renamingFolder;
+		const name = renameFolderName.trim();
+		if (!folder || !name || renamingFolderBusy) return;
+		renamingFolderBusy = true;
+		try {
+			const updated = await sessionRenameFolder(folder.id, name);
+			folders = folders.map((item) => (item.id === updated.id ? updated : item));
+			renamingFolder = undefined;
+		} catch (err) {
+			addToast(String(err), 'error');
+		} finally {
+			renamingFolderBusy = false;
+		}
 	}
 
 	function openFolderMenu(e: MouseEvent, folder: Folder): void {
@@ -582,9 +717,51 @@
 		}
 	});
 
+	// Order is a view preference, not part of a session: it stays on this
+	// device and never travels with a shared vault. Without it the backend
+	// returns whatever order the vault happens to list, so a drag would be
+	// forgotten on the next load.
+	const SESSION_ORDER_KEY = 'coreops-session-order';
+	let sessionOrder: string[] = loadSessionOrder();
+
+	function loadSessionOrder(): string[] {
+		try {
+			const raw = localStorage.getItem(SESSION_ORDER_KEY);
+			const parsed = raw ? JSON.parse(raw) : [];
+			return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+		} catch {
+			return [];
+		}
+	}
+
+	function saveSessionOrder(ids: string[]): void {
+		sessionOrder = ids;
+		try {
+			localStorage.setItem(SESSION_ORDER_KEY, JSON.stringify(ids));
+		} catch {
+			// Storage unavailable; the order still works for this run.
+		}
+	}
+
+	function orderSessions(list: SessionConfig[]): SessionConfig[] {
+		const rank = new Map(sessionOrder.map((id, index) => [id, index]));
+		const ordered = [...list].sort((a, b) => {
+			const ra = rank.get(a.id);
+			const rb = rank.get(b.id);
+			if (ra === undefined && rb === undefined) return 0;
+			if (ra === undefined) return 1;
+			if (rb === undefined) return -1;
+			return ra - rb;
+		});
+		saveSessionOrder(ordered.map((session) => session.id));
+		return ordered;
+	}
+
 	async function loadSessions(): Promise<void> {
 		try {
-			[sessions, folders] = await Promise.all([sessionList(), sessionListFolders()]);
+			const [loadedSessions, loadedFolders] = await Promise.all([sessionList(), sessionListFolders()]);
+			sessions = orderSessions(loadedSessions);
+			folders = loadedFolders;
 		} catch (err) {
 			console.error('Failed to load sessions:', err);
 		} finally {
@@ -1132,7 +1309,14 @@
 			<button class="delete-cancel-btn" onclick={() => (deleteConfirm = null)}>{t('common.cancel')}</button>
 		</div>
 	{:else}
-		<div class:folder-session={depth >= 0} style:padding-left={depth >= 0 ? `${Math.min(depth + 1, 8) * 14}px` : undefined}>
+		<div
+			class="session-row"
+			class:folder-session={depth >= 0}
+			class:drop-target={dropSessionId === session.id}
+			class:drop-after={dropSessionId === session.id && dropSessionAfter}
+			data-session-id={session.id}
+			style:padding-left={depth >= 0 ? `${Math.min(depth + 1, 8) * 14}px` : undefined}
+		>
 			<SessionCard {session} vault={selectedVaultId === ALL_VAULTS && session.vault_id ? (vaultState.vaults.get(session.vault_id) ?? null) : null} onconnect={() => handleConnect(session)} onedit={() => handleEdit(session)} ondelete={() => handleDelete(session)} oncontextmenu={(e) => openSessionContextMenu(e, session)} ondragstart={(e) => handleDragStart(e, session)} ondragend={() => {}} {selecting} selected={selected.has(session.id)} onselect={(e) => toggleSelect(session, e)} />
 		</div>
 	{/if}
@@ -1211,7 +1395,16 @@
 			<p class="init-desc">{t('session.keychain_locked_desc')}</p>
 		</div>
 	{:else}
-		<VaultSelector onvaultselect={(filter) => { selectedVaultId = filter; creatingFolder = false; creatingFolderParentId = null; pendingMove = null; newFolderName = ''; }} onrefresh={() => loadSessions()} />
+		<VaultSelector
+			allLabel={t('session.all_sessions')}
+			privateGroupLabel={t('session.session_groups')}
+			newVaultLabel={t('session.new_session_group')}
+			searchPlaceholder={t('session.search_session_groups')}
+			deviceLabel={t('session.default_group')}
+			deviceMetaLabel=""
+			onvaultselect={(filter) => { selectedVaultId = filter; creatingFolder = false; creatingFolderParentId = null; pendingMove = null; newFolderName = ''; }}
+			onrefresh={() => loadSessions()}
+		/>
 
 		<div class="tool-row">
 			<div class="search-row">
@@ -1384,6 +1577,11 @@
 						{t('session.remove_from_folder')}
 					</button>
 				{/if}
+				{#if !(selected.has(contextMenu.session.id) && selected.size > 1)}
+					<button class="context-item" onclick={() => { if (contextMenu?.session) openMoveVault(contextMenu.session); }} type="button">
+						{t('session.move_to_session_group')}
+					</button>
+				{/if}
 				<div class="context-sep"></div>
 				{#if selected.has(contextMenu.session.id) && selected.size > 1}
 					<button class="context-item context-danger" onclick={() => { bulkDeleteConfirm = true; closeContextMenu(); }} type="button">
@@ -1396,6 +1594,7 @@
 				{/if}
 			{:else if contextMenu.folder}
 				<button class="context-item" onclick={() => contextNewFolder(contextMenu?.folder?.id ?? null)} type="button">{t('session.new_folder')}</button>
+				<button class="context-item" onclick={() => { if (contextMenu?.folder) openRenameFolder(contextMenu.folder); }} type="button">{t('session.rename_folder')}</button>
 				<div class="context-sep"></div>
 				<div class="context-label">{t('session.move_to_folder')}</div>
 				<div class="context-folders">
@@ -1412,6 +1611,44 @@
 		</div>
 	{/if}
 </div>
+
+<Modal open={!!moveVaultSession} onclose={() => { if (!movingVault) moveVaultSession = undefined; }} title={t('session.move_to_session_group_title')} maxWidth="420px">
+	<div class="move-body">
+		<div class="move-list" role="radiogroup" aria-label={t('session.move_to_session_group')}>
+			{#each moveVaultTargets as target (target.id ?? 'device')}
+				<button type="button" role="radio" aria-checked={moveVaultTarget === target.id} class="move-option" class:chosen={moveVaultTarget === target.id} onclick={() => (moveVaultTarget = target.id)}>
+					<span class="move-name">{target.name}</span>
+					<span class="move-count">{sessions.filter((session) => (session.vault_id ?? null) === target.id).length}</span>
+				</button>
+			{/each}
+			{#if moveVaultTargets.length === 0}
+				<p class="move-empty">{t('session.no_matches')}</p>
+			{/if}
+		</div>
+	</div>
+	{#snippet actions()}
+		<Button variant="ghost" disabled={movingVault} onclick={() => (moveVaultSession = undefined)}>{t('common.cancel')}</Button>
+		<Button variant="primary" disabled={moveVaultTarget === undefined || movingVault} onclick={() => void confirmMoveVault()}>{t('common.save')}</Button>
+	{/snippet}
+</Modal>
+
+<Modal open={!!renamingFolder} onclose={() => { if (!renamingFolderBusy) renamingFolder = undefined; }} title={t('session.rename_folder')} maxWidth="400px">
+	<div class="rename-folder-body">
+		<label class="rename-folder-label" for="rename-folder-input">{t('session.folder_name')}</label>
+		<input
+			id="rename-folder-input"
+			class="rename-folder-input"
+			type="text"
+			bind:value={renameFolderName}
+			disabled={renamingFolderBusy}
+			onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void confirmRenameFolder(); } }}
+		/>
+	</div>
+	{#snippet actions()}
+		<Button variant="ghost" disabled={renamingFolderBusy} onclick={() => (renamingFolder = undefined)}>{t('common.cancel')}</Button>
+		<Button variant="primary" disabled={!renameFolderName.trim() || renamingFolderBusy} onclick={() => void confirmRenameFolder()}>{t('common.save')}</Button>
+	{/snippet}
+</Modal>
 
 <Modal open={moveIds_ !== null} onclose={() => (moveIds_ = null)} title={t('session.move_n_title', { count: String(moveIds_?.length ?? 0) })} maxWidth="420px">
 	<div class="move-body">
@@ -1462,7 +1699,7 @@
 		title={t('session.delete_n', { count: String(selected.size) })}
 		message={t('session.delete_n_message', { count: String(selected.size) })}
 		items={sessions.filter(s => selected.has(s.id)).map(s => `${s.name} (${s.username ? s.username + '@' : ''}${s.host})`)}
-		where={selectedVaultId === ALL_VAULTS ? t('vault.all_vaults') : selectedVaultId ? (vaultState.vaults.get(selectedVaultId)?.name ?? t('vault.private')) : t('vault.private')}
+		where={selectedVaultId === ALL_VAULTS ? t('session.all_sessions') : selectedVaultId ? (vaultState.vaults.get(selectedVaultId)?.name ?? t('session.default_group')) : t('session.default_group')}
 		environment="none"
 		confirmLabel={t('session.delete_n', { count: String(selected.size) })}
 		typeToConfirm={t('session.delete_n_typed', { count: String(selected.size) })}
@@ -1809,6 +2046,34 @@
 		border-color: var(--color-accent);
 	}
 
+	.rename-folder-body {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.rename-folder-label {
+		font-size: var(--text-xs);
+		color: var(--color-text-secondary);
+	}
+
+	.rename-folder-input {
+		width: 100%;
+		box-sizing: border-box;
+		padding: 7px 10px;
+		border: 1px solid var(--color-border);
+		border-radius: 5px;
+		background: var(--color-bg-primary);
+		color: var(--color-text-primary);
+		font-family: var(--font-sans);
+		font-size: var(--text-sm);
+		outline: none;
+	}
+
+	.rename-folder-input:focus {
+		border-color: var(--color-accent);
+	}
+
 	.new-folder-save,
 	.new-folder-cancel {
 		padding: 4px 8px;
@@ -1942,6 +2207,32 @@
 
 	.folder-session {
 		padding-left: 12px;
+	}
+
+	.session-row {
+		position: relative;
+		border-radius: 6px;
+	}
+
+	.session-row.drop-target {
+		background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+	}
+
+	.session-row.drop-target::after {
+		content: '';
+		position: absolute;
+		left: 8px;
+		right: 8px;
+		top: -1px;
+		height: 2px;
+		border-radius: 1px;
+		background: var(--color-accent);
+		pointer-events: none;
+	}
+
+	.session-row.drop-target.drop-after::after {
+		top: auto;
+		bottom: -1px;
 	}
 
 	.context-menu {

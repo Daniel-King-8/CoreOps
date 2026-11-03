@@ -1,6 +1,6 @@
 # Changelog
 
-CoreOps-specific release notes live in `README.md`. This file tracks the upstream Reach changelog; CoreOps 0.8.0 is based on Reach v0.8.8, whose notes appear first.
+CoreOps-specific release notes live in `README.md`. This file tracks the upstream Reach changelog; CoreOps 0.8.1 is based on Reach v0.8.8, whose notes appear first.
 
 ## v0.8.8
 - **Personal sync: delete and edit work again** — Turning on personal sync copied every session, folder, snippet and setting into the synced vault under a new id, `{vault}_{id}`. After that, deleting or editing one looked done but did nothing, or failed with *Session not found*. The copy now keeps each item's own id, and the first start after the update puts back the ids of anything copied before, so data already synced works again with nothing to redo. A check for an item that fails is now reported, not taken as "not there". Reported, diagnosed and partly fixed by @ahhexia (#148, #149).

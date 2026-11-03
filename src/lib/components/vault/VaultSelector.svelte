@@ -11,16 +11,30 @@
 		type VaultFilter,
 		type VaultInfo
 	} from '#lib/state/vault.svelte.js';
-	import { inviteMember, listMembers, removeMember, type MemberInfo, type InviteInfo } from '#lib/ipc/vault.js';
+	import { renameVault, inviteMember, listMembers, removeMember, type MemberInfo, type InviteInfo } from '#lib/ipc/vault.js';
 	import { addToast } from '#lib/state/toasts.svelte.js';
 	import { t } from '#lib/state/i18n.svelte.js';
 
 	interface Props {
 		onvaultselect?: (filter: VaultFilter) => void;
 		onrefresh?: () => void;
+		/** What "all vaults" is called in this context. The session list calls
+		 *  it "all sessions", since that is what the filter shows. */
+		allLabel?: string;
+		/** The heading over private vaults; the session list calls them
+		 *  "session groups". */
+		privateGroupLabel?: string;
+		/** The footer's create button, in this context's vocabulary. */
+		newVaultLabel?: string;
+		/** The search field's placeholder, in this context's vocabulary. */
+		searchPlaceholder?: string;
+		/** The device's own vault, in this context's vocabulary. */
+		deviceLabel?: string;
+		/** The line under the device vault's name; empty hides it. */
+		deviceMetaLabel?: string;
 	}
 
-	let { onvaultselect, onrefresh }: Props = $props();
+	let { onvaultselect, onrefresh, allLabel, privateGroupLabel, newVaultLabel, searchPlaceholder, deviceLabel, deviceMetaLabel }: Props = $props();
 
 	let showCreateDialog = $state(false);
 	let newVaultName = $state('');
@@ -45,6 +59,12 @@
 	let showDeleteDialog = $state(false);
 	let vaultToDelete = $state<VaultInfo | null>(null);
 	let deleting = $state(false);
+
+	let showRenameDialog = $state(false);
+	let vaultToRename = $state<VaultInfo | null>(null);
+	let renameVaultName = $state('');
+	let renaming = $state(false);
+	let vaultMenu = $state<{ x: number; y: number; vault: VaultInfo } | undefined>();
 
 	// Invite dialog state
 	let showInviteDialog = $state(false);
@@ -92,12 +112,12 @@
 		const q = query.trim().toLowerCase();
 		const hit = (label: string) => !q || label.toLowerCase().includes(q);
 		const out: Option[] = [];
-		const all = t('vault.all_vaults');
-		const mine = t('vault.private_this_device');
+		const all = allLabel ?? t('vault.all_vaults');
+		const mine = deviceLabel ?? t('vault.private_this_device');
 		if (hit(all)) out.push({ key: 'all', filter: ALL_VAULTS, label: all });
 		if (hit(mine)) out.push({ key: 'device', filter: null, label: mine });
 		for (const v of privateVaults) {
-			if (hit(v.name)) out.push({ key: v.id, filter: v.id, label: v.name, group: t('vault.private'), vault: v });
+			if (hit(v.name)) out.push({ key: v.id, filter: v.id, label: v.name, group: privateGroupLabel ?? t('vault.private'), vault: v });
 		}
 		for (const v of sharedVaults) {
 			if (hit(v.name)) out.push({ key: v.id, filter: v.id, label: v.name, group: t('vault.shared'), vault: v });
@@ -107,14 +127,14 @@
 
 	/** What the closed control says. */
 	let triggerName = $derived(
-		selected === ALL_VAULTS ? t('vault.all_vaults') : current ? current.name : t('vault.private')
+		selected === ALL_VAULTS ? (allLabel ?? t('vault.all_vaults')) : current ? current.name : (deviceLabel ?? t('vault.private'))
 	);
 	let triggerMeta = $derived.by(() => {
 		// With no vaults of their own, "0 vaults · 0 shared" says nothing.
 		if (selected === ALL_VAULTS) {
 			return userVaults.length ? t('vault.vaults_summary', { count: userVaults.length, shared: sharedVaults.length }) : '';
 		}
-		if (!current) return t('vault.this_device');
+		if (!current) return deviceMetaLabel ?? t('vault.this_device');
 		if (current.unreachable) return t('vault.unreachable');
 		if (current.vaultType === 'shared') {
 			return `${t('vault.shared')} · ${t('vault.n_members', { count: current.memberCount ?? 0 })}`;
@@ -209,6 +229,46 @@
 		e.stopPropagation();
 		vaultToDelete = vault;
 		showDeleteDialog = true;
+	}
+
+	function openVaultMenu(e: MouseEvent, vault: VaultInfo): void {
+		e.preventDefault();
+		e.stopPropagation();
+		open = false;
+		query = '';
+		vaultMenu = { x: e.clientX, y: e.clientY, vault };
+	}
+
+	function closeVaultMenu(): void {
+		vaultMenu = undefined;
+	}
+
+	function startRenameVault(vault: VaultInfo): void {
+		closeVaultMenu();
+		open = false;
+		query = '';
+		vaultToRename = vault;
+		renameVaultName = vault.name;
+		error = '';
+		showRenameDialog = true;
+	}
+
+	async function handleRenameVault(): Promise<void> {
+		if (!vaultToRename || !renameVaultName.trim() || renaming) return;
+		renaming = true;
+		error = '';
+		try {
+			await renameVault(vaultToRename.id, renameVaultName.trim());
+			await refreshVaults();
+			onrefresh?.();
+			showRenameDialog = false;
+			vaultToRename = null;
+			addToast(t('vault.renamed_toast'), 'success');
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+		} finally {
+			renaming = false;
+		}
 	}
 
 	function openInviteDialog(vault: VaultInfo, e: Event) {
@@ -338,9 +398,9 @@ Go to Settings > Sync > Accept Vault Invite`;
 				type="text"
 				bind:this={searchEl}
 				bind:value={query}
-				placeholder={t('vault.search_vaults')}
+				placeholder={searchPlaceholder ?? t('vault.search_vaults')}
 				oninput={() => (active = 0)}
-				aria-label={t('vault.search_vaults')}
+				aria-label={searchPlaceholder ?? t('vault.search_vaults')}
 			/>
 			<div class="pop-list">
 				{#each options as o, i (o.key)}
@@ -357,6 +417,10 @@ Go to Settings > Sync > Accept Vault Invite`;
 							aria-selected={o.filter === selected}
 							onmouseenter={() => (active = i)}
 							onclick={() => choose(o.filter)}
+							oncontextmenu={(e) => {
+								if (!o.vault) return;
+								openVaultMenu(e, o.vault);
+							}}
 						>
 							{#if o.vault?.unreachable}
 								<span class="dot" title={[t('vault.unreachable'), o.vault.syncError].filter(Boolean).join(' — ')}></span>
@@ -413,7 +477,7 @@ Go to Settings > Sync > Accept Vault Invite`;
 			<div class="pop-foot">
 				<button class="foot-btn" onclick={() => { open = false; showCreateDialog = true; }}>
 					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-					{t('vault.new_vault')}
+					{newVaultLabel ?? t('vault.new_vault')}
 				</button>
 				<button class="foot-btn" onclick={handleRefresh} disabled={refreshing} title={t('vault.refresh_vaults')}>
 					<svg class:spinning={refreshing} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -425,6 +489,20 @@ Go to Settings > Sync > Accept Vault Invite`;
 		</div>
 	{/if}
 </div>
+
+{#if vaultMenu}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
+	<div class="vault-menu-backdrop" onclick={closeVaultMenu} oncontextmenu={(e) => { e.preventDefault(); closeVaultMenu(); }}></div>
+	<div class="vault-menu" role="menu" style:left="{vaultMenu.x}px" style:top="{vaultMenu.y}px">
+		<button class="vault-menu-item" role="menuitem" onclick={() => { const vault = vaultMenu?.vault; if (vault) startRenameVault(vault); }} type="button">
+			{t('vault.rename')}
+		</button>
+		<button class="vault-menu-item danger" role="menuitem" onclick={(e) => { const vault = vaultMenu?.vault; closeVaultMenu(); if (vault) confirmDelete(vault, e); }} type="button">
+			{t('common.delete')}
+		</button>
+	</div>
+{/if}
 
 <!-- Create Vault Dialog -->
 {#if showCreateDialog}
@@ -486,6 +564,41 @@ Go to Settings > Sync > Accept Vault Invite`;
 				</button>
 				<button class="btn-primary" onclick={handleCreateVault} disabled={creating || !newVaultName.trim()}>
 					{#if creating}{t('vault.creating')}{:else}{t('vault.create_short')}{/if}
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Rename Vault Dialog -->
+{#if showRenameDialog && vaultToRename}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="dialog-overlay" onclick={() => { if (!renaming) showRenameDialog = false; }} onkeydown={(e) => { if (e.key === 'Escape' && !renaming) showRenameDialog = false; }}>
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="dialog" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+			<h3>{t('vault.rename')}</h3>
+
+			<div class="form-group">
+				<label for="vault-rename-name">{t('vault.secret_name')}</label>
+				<input
+					id="vault-rename-name"
+					type="text"
+					bind:value={renameVaultName}
+					disabled={renaming}
+					onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void handleRenameVault(); } }}
+				/>
+			</div>
+
+			{#if error}
+				<p class="error">{error}</p>
+			{/if}
+
+			<div class="dialog-actions">
+				<button class="btn-secondary" onclick={() => (showRenameDialog = false)} disabled={renaming}>
+					{t('common.cancel')}
+				</button>
+				<button class="btn-primary" onclick={() => void handleRenameVault()} disabled={renaming || !renameVaultName.trim()}>
+					{t('common.save')}
 				</button>
 			</div>
 		</div>
@@ -601,6 +714,45 @@ Go to Settings > Sync > Accept Vault Invite`;
 {/if}
 
 <style>
+	.vault-menu-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 150;
+	}
+
+	.vault-menu {
+		position: fixed;
+		z-index: 151;
+		min-width: 140px;
+		padding: 4px;
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+		background: var(--color-bg-elevated);
+		box-shadow: var(--shadow-elevated);
+	}
+
+	.vault-menu-item {
+		display: block;
+		width: 100%;
+		padding: 7px 10px;
+		border: none;
+		border-radius: 5px;
+		background: transparent;
+		color: var(--color-text-primary);
+		font-family: var(--font-sans);
+		font-size: var(--text-sm);
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.vault-menu-item:hover {
+		background: var(--color-surface-hover);
+	}
+
+	.vault-menu-item.danger {
+		color: var(--color-danger);
+	}
+
 	.vault-switcher {
 		position: relative;
 		padding: 4px 0 8px;

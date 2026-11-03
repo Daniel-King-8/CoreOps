@@ -532,6 +532,21 @@ pub async fn vault_create(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+#[tracing::instrument(skip(state))]
+pub async fn vault_rename(
+    vault_id: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Vault name cannot be empty".to_string());
+    }
+    let mut manager = state.vault_manager.lock().await;
+    manager.rename_vault(&vault_id, &name).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
 #[tracing::instrument(skip(state, token))]
 pub async fn vault_open(
     vault_id: String,

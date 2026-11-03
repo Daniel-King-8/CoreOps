@@ -255,6 +255,11 @@ export async function sessionMoveToFolder(sessionIds: string[], folderId: string
   return invoke<number>('session_move_to_folder', { sessionIds, folderId });
 }
 
+/** Move one session into another vault (`null`: the device's private vault). */
+export async function sessionMoveToVault(sessionId: string, targetVaultId: string | null): Promise<void> {
+  return invoke('session_move_to_vault', { sessionId, targetVaultId });
+}
+
 export async function sessionListFolders(): Promise<Folder[]> {
   return invoke<Folder[]>('session_list_folders');
 }
@@ -265,6 +270,10 @@ export async function sessionCreateFolder(name: string, parentId: string | null,
 
 export async function sessionUpdateFolderParent(folderId: string, parentId: string | null): Promise<Folder> {
   return invoke<Folder>('session_update_folder_parent', { folderId, parentId });
+}
+
+export async function sessionRenameFolder(folderId: string, name: string): Promise<Folder> {
+  return invoke<Folder>('session_rename_folder', { folderId, name });
 }
 
 export async function sessionDeleteFolder(folderId: string): Promise<void> {

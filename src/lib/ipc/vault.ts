@@ -180,6 +180,10 @@ export async function closeVault(vaultId: string): Promise<void> {
 	return invoke('vault_close', { vault_id: vaultId });
 }
 
+export async function renameVault(vaultId: string, name: string): Promise<void> {
+  return invoke('vault_rename', { vaultId, name });
+}
+
 export async function deleteVault(vaultId: string): Promise<void> {
 	return invoke('vault_delete', { vault_id: vaultId });
 }

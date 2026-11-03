@@ -864,6 +864,71 @@ pub async fn session_move_to_folder(
     Ok(moved)
 }
 
+/// Move a session into another vault (a "session group"). `None` targets the
+/// device's own private vault. The session keeps its id and content; only
+/// its vault and folder change, and the source copy is removed.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn session_move_to_vault(
+    state: State<'_, AppState>,
+    session_id: String,
+    target_vault_id: Option<String>,
+) -> Result<(), String> {
+    let mut manager = state.vault_manager.lock().await;
+    if manager.is_locked() {
+        return Err("Vault is locked".to_string());
+    }
+
+    let to_device = target_vault_id.is_none();
+    let target_vault = match target_vault_id {
+        Some(vault_id) => {
+            if !is_user_vault(&manager, &vault_id).await? {
+                return Err("Target is not a user vault".to_string());
+            }
+            vault_id
+        }
+        None => ensure_sessions_vault(&mut manager).await?,
+    };
+
+    let loc = locate_session(&manager, &session_id)
+        .await
+        .ok_or_else(|| format!("Session not found: {session_id}"))?;
+    if loc.vault_id == target_vault {
+        return Ok(());
+    }
+    if manager.secret_exists(&target_vault, &session_id).await {
+        return Err("This session already exists in the target vault".to_string());
+    }
+
+    let mut session = read_session(&manager, &loc.vault_id, &loc.secret_id).await?;
+    session.vault_id = if to_device { None } else { Some(target_vault.clone()) };
+    // A folder id belongs to the source vault; leave it behind rather than
+    // pointing at a folder that does not exist in the target.
+    session.folder_id = None;
+
+    let name = session.name.clone();
+    let json = serde_json::to_vec(&session).map_err(|e| e.to_string())?;
+    manager
+        .create_secret_with_id(
+            &target_vault,
+            &session_id,
+            &name,
+            SecretCategory::Session,
+            SecretBox::new(Box::new(json)),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Err(e) = manager.delete_secret(&loc.vault_id, &loc.secret_id).await {
+        // Do not leave a second copy behind because the source could not go.
+        let _ = manager.delete_secret(&target_vault, &session_id).await;
+        return Err(e.to_string());
+    }
+
+    tracing::info!("Moved session {} from vault {} to vault {}", session_id, loc.vault_id, target_vault);
+    Ok(())
+}
+
 /// Delete a session by ID. O(1) delete.
 #[tauri::command]
 #[tracing::instrument(skip(state))]
@@ -1048,6 +1113,53 @@ async fn set_folder_parent(
         .map_err(|e| e.to_string())?;
 
     tracing::info!("Moved folder: {} under {:?}", folder.id, folder.parent_id);
+    Ok(folder)
+}
+
+/// Rename a session folder.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn session_rename_folder(
+    state: State<'_, AppState>,
+    folder_id: String,
+    name: String,
+) -> Result<Folder, String> {
+    let manager = state.vault_manager.lock().await;
+    if manager.is_locked() {
+        return Err("Vault is locked".to_string());
+    }
+
+    rename_folder(&manager, folder_id, name).await
+}
+
+async fn rename_folder(
+    manager: &crate::vault::VaultManager,
+    folder_id: String,
+    name: String,
+) -> Result<Folder, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Folder name cannot be empty".to_string());
+    }
+
+    let mut folder = read_folders(manager)
+        .await?
+        .into_iter()
+        .find(|folder| folder.id == folder_id)
+        .ok_or_else(|| format!("Folder not found: {folder_id}"))?;
+    folder.name = name;
+
+    let json = serde_json::to_string(&folder).map_err(|e| e.to_string())?;
+    let plaintext = SecretBox::new(Box::new(json.into_bytes()));
+    let vault_id = find_folder_vault(manager, &folder.id)
+        .await
+        .ok_or_else(|| format!("Folder not found: {}", folder.id))?;
+    manager
+        .update_secret(&vault_id, &folder.id, plaintext)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tracing::info!("Renamed folder: {} to {}", folder.id, folder.name);
     Ok(folder)
 }
 

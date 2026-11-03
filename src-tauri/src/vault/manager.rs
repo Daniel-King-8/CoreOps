@@ -1841,6 +1841,49 @@ impl VaultManager {
         })
     }
 
+    /// Rename a vault. The name is stored in the vault header and in the
+    /// identity's list of user vaults, so it survives a restart.
+    pub async fn rename_vault(&mut self, vault_id: &str, new_name: &str) -> Result<(), VaultError> {
+        let name = new_name.trim();
+        if name.is_empty() {
+            return Err(VaultError::AccessDenied("Vault name cannot be empty".to_string()));
+        }
+
+        let vault = self
+            .vaults
+            .get(vault_id)
+            .ok_or_else(|| VaultError::NotFound(vault_id.to_string()))?;
+        let old_name = vault.header.name.clone();
+
+        if old_name != name {
+            if self.vault_names.get(name).is_some_and(|id| id != vault_id) {
+                return Err(VaultError::AlreadyExists(name.to_string()));
+            }
+
+            vault
+                .execute(
+                    "UPDATE vault_header SET name = ? WHERE id = ?",
+                    (name, vault_id),
+                )
+                .await?;
+
+            if let Some(vault) = self.vaults.get_mut(vault_id) {
+                vault.header.name = name.to_string();
+            }
+            self.vault_names.remove(&old_name);
+            self.vault_names.insert(name.to_string(), vault_id.to_string());
+        }
+
+        if let Some(stored) = self.user_vaults.iter_mut().find(|v| v.id == vault_id) {
+            stored.name = name.to_string();
+        }
+        if !name.starts_with("__") {
+            self.save_identity_current().await?;
+        }
+
+        Ok(())
+    }
+
     /// Open an existing vault.
     /// The cache of a synced vault, read from disk if there is one. `None`
     /// before the identity is loaded, which the cache key comes from.
