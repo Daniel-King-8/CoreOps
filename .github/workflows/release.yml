@@ -296,7 +296,6 @@ jobs:
 
   build-android:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -307,17 +306,18 @@ jobs:
           java-version: '17'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          save-if: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -329,28 +329,30 @@ jobs:
         run: npm ci
 
       - name: Initialize Android project
-        run: npx tauri android init
-
-      - name: Generate signing keystore
         run: |
-          keytool -genkey -v \
-            -keystore ${{ runner.temp }}/release.keystore \
-            -alias reach \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass reachapp -keypass reachapp \
-            -dname "CN=Reach,O=Reach,L=Unknown,ST=Unknown,C=US"
+          npx tauri android init
+          cp -r src-tauri/icons/android/. src-tauri/gen/android/app/src/main/res/
+          cp src-tauri/android/MainActivity.kt src-tauri/gen/android/app/src/main/java/com/reach/desktop/MainActivity.kt
 
-      - name: Configure signing in Gradle
+      # A permanent key, kept as a repository secret. Android only installs an
+      # update over an app signed with the same key, so a keystore generated
+      # fresh for every build makes every update fail until the old app is
+      # uninstalled. Create it once and add the base64 text as
+      # ANDROID_KEYSTORE_BASE64, the password as ANDROID_KEYSTORE_PASSWORD.
+      - name: Restore signing key
+        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > ${{ runner.temp }}/release.keystore
+
+      - name: Configure signing and packaging in Gradle
         run: |
           cat >> src-tauri/gen/android/app/build.gradle.kts << 'GRADLE'
 
           android {
               signingConfigs {
                   create("release") {
-                      storeFile = file("${{ runner.temp }}/release.keystore")
-                      storePassword = "reachapp"
+                      storeFile = file(System.getenv("ANDROID_KEYSTORE_PATH"))
+                      storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
                       keyAlias = "reach"
-                      keyPassword = "reachapp"
+                      keyPassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
                   }
               }
               buildTypes {
@@ -358,38 +360,35 @@ jobs:
                       signingConfig = signingConfigs.getByName("release")
                   }
               }
+              packaging {
+                  jniLibs {
+                      useLegacyPackaging = true
+                  }
+              }
           }
           GRADLE
 
-      - name: Build Android APK
-        run: npx tauri android build --apk
-        env:
-          NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-
-      - name: Sign APK with apksigner
+      - name: Build Android APKs
         run: |
+          export NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          echo "NDK_HOME=$NDK_HOME"
+          npx tauri android build --apk --split-per-abi --target aarch64 --target armv7
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+
+      - name: Name and verify APKs
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          OUT=src-tauri/gen/android/app/build/outputs/apk
+          mkdir -p dist-android
+          cp "$(find $OUT -path '*arm64*' -name '*release*.apk' | head -1)" "dist-android/CoreOps_${VERSION}_android_arm64.apk"
+          cp "$(find $OUT -path '*arm*' ! -path '*arm64*' -name '*release*.apk' | head -1)" "dist-android/CoreOps_${VERSION}_android_armv7.apk"
           BUILD_TOOLS=$(ls -d $ANDROID_SDK_ROOT/build-tools/*/ | sort -V | tail -1)
-          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
-          ${BUILD_TOOLS}apksigner sign \
-            --ks ${{ runner.temp }}/release.keystore \
-            --ks-key-alias reach \
-            --ks-pass pass:reachapp \
-            --key-pass pass:reachapp \
-            "$APK"
-          ${BUILD_TOOLS}apksigner verify "$APK"
+          for apk in dist-android/*.apk; do ${BUILD_TOOLS}apksigner verify "$apk"; done
+          ls -la dist-android
 
-      - name: Rename and upload APK
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"
-          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
-          cp "$APK" "CoreOps_${VERSION}_Android.apk"
-          gh release upload ${{ github.ref_name }} "CoreOps_${VERSION}_Android.apk" --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Remove old APK name
-        run: |
-          gh release delete-asset ${{ github.ref_name }} "app-universal-release.apk" --yes 2>/dev/null || true
+      - name: Upload APKs to release
+        run: gh release upload "${{ github.ref_name }}" dist-android/*.apk --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
