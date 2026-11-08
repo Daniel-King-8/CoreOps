@@ -14,7 +14,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/based_on-Reach%200.8.8-0a84ff?style=flat-square" alt="Based on Reach 0.8.8" />
-  <img src="https://img.shields.io/badge/version-0.8.2--beta-brightgreen?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-0.8.2-brightgreen?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-333?style=flat-square" alt="Platforms" />
   <img src="https://img.shields.io/badge/AI-DeepSeek%20%7C%20Qwen%20%7C%20OpenAI-blueviolet?style=flat-square" alt="AI Support" />
 </p>
@@ -250,6 +250,16 @@ A dedicated AI tab in Settings: custom API base URL, encrypted key storage, mode
 
 CoreOps once rewrote session reordering with Pointer Events to work around HTML5 drag-and-drop problems in Tauri WebView2 on Windows; upstream later adopted this.
 
+### 5. Custom background and appearance (new in 0.8.2)
+
+**Settings → Appearance → Custom appearance** lets you pick a local picture as the app background, adjust its visibility, and override the primary/secondary text and accent colours. The picture is stored on this device only and is not synced with the vault.
+
+The terminal keeps the theme's solid colour by default. Turn on **Terminal background** and it shows the picture like the rest of the interface, applying immediately to open terminals.
+
+Settings, confirmation dialogs, dropdown menus and the command palette never show the interface behind them: each shows the matching part of the picture at its own position, covering what it should and staying aligned with the wallpaper.
+
+![Custom background and appearance](Picture/custom-background.png)
+
 ---
 
 ## Inherited from Reach 0.8.8
@@ -330,13 +340,14 @@ npm run tauri build    # production installers
 
 ## Changelog
 
-### v0.8.2-beta
+### v0.8.2
 
 - Added Custom appearance: pick a local picture as the app background, adjust its visibility, and override the primary/secondary text and accent colours
 - Added a terminal background switch: keep the theme's solid terminal colour, or let the terminal show the custom picture like the rest of the interface. Open terminals update immediately
-- Settings and confirmation dialogs no longer show the interface behind them; they show the picture only
+- Settings, confirmation dialogs, dropdown menus and the command palette no longer show the interface behind them; they show the matching part of the picture only
+- Session group dropdown: right-clicking a group keeps the list open, with the rename/delete menu on top
 - The Windows installer now offers Simplified Chinese and English, defaulting to Chinese on Chinese systems
-- Version set to 0.8.2-beta
+- Version set to 0.8.2
 
 ### v0.8.1
 

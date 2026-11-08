@@ -16,7 +16,7 @@
 	<div class="toast-container">
 		{#each toasts as toast (toast.id)}
 			<div
-				class="toast"
+				class="toast wallpaper-surface"
 				class:dismissing={toast.dismissing}
 				class:detailed={toast.type === 'error' || toast.type === 'warning'}
 				role="alert"

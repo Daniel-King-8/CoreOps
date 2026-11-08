@@ -114,7 +114,7 @@
 	</button>
 
 	{#if open}
-		<div class="menu">
+		<div class="menu wallpaper-surface">
 			<input
 				bind:this={inputEl}
 				bind:value={query}

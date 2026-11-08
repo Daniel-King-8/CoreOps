@@ -234,8 +234,9 @@
 	function openVaultMenu(e: MouseEvent, vault: VaultInfo): void {
 		e.preventDefault();
 		e.stopPropagation();
-		open = false;
-		query = '';
+		// Keep the group list open behind the menu: right-clicking a group is
+		// about that group, and collapsing the list first made it look as if the
+		// group had disappeared. The list closes when the menu closes instead.
 		vaultMenu = { x: e.clientX, y: e.clientY, vault };
 	}
 
@@ -392,7 +393,7 @@ Go to Settings > Sync > Accept Vault Invite`;
 	</button>
 
 	{#if open}
-		<div class="pop pop-in" role="listbox" aria-label={t('vault.vaults')}>
+		<div class="pop pop-in wallpaper-surface" role="listbox" aria-label={t('vault.vaults')}>
 			<input
 				class="pop-search"
 				type="text"
@@ -494,7 +495,7 @@ Go to Settings > Sync > Accept Vault Invite`;
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div class="vault-menu-backdrop" onclick={closeVaultMenu} oncontextmenu={(e) => { e.preventDefault(); closeVaultMenu(); }}></div>
-	<div class="vault-menu" role="menu" style:left="{vaultMenu.x}px" style:top="{vaultMenu.y}px">
+	<div class="vault-menu wallpaper-surface" role="menu" style:left="{vaultMenu.x}px" style:top="{vaultMenu.y}px">
 		<button class="vault-menu-item" role="menuitem" onclick={() => { const vault = vaultMenu?.vault; if (vault) startRenameVault(vault); }} type="button">
 			{t('vault.rename')}
 		</button>

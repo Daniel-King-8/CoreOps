@@ -15,7 +15,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/基于-Reach%200.8.8-0a84ff?style=flat-square" alt="Based on Reach 0.8.8" />
-  <img src="https://img.shields.io/badge/version-0.8.2--beta-brightgreen?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-0.8.2-brightgreen?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-333?style=flat-square" alt="Platforms" />
   <img src="https://img.shields.io/badge/AI-DeepSeek%20%7C%20Qwen%20%7C%20OpenAI-blueviolet?style=flat-square" alt="AI Support" />
 </p>
@@ -250,6 +250,16 @@ AI 面板位于终端右侧，不是简单的聊天窗口，而是和当前终�
 
 原版在 Windows WebView2 下 HTML5 拖拽存在兼容问题，CoreOps 曾重写为 Pointer Events 实现；该能力后来已被上游吸收。
 
+### ⑤ 自定义背景与外观（v0.8.2 新增）
+
+**设置 → 外观 → 自定义外观** 可以选择本机图片作为应用背景，调节背景可见度，并覆盖主文字、次要文字和强调色。背景图只保存在本机，不会随 Vault 同步。
+
+终端默认保持主题纯色背景；打开「终端显示自定义背景」后，终端会像界面其他部分一样透出背景图，已打开的终端实时生效。
+
+设置窗口、确认弹窗、下拉菜单和搜索面板不会透出后面的界面内容：它们只显示当前位置对应的那块背景图，既挡住该挡的部分，也和窗口壁纸保持对齐。
+
+![自定义背景与外观](Picture/custom-background.png)
+
 ---
 
 ## 完整继承自 Reach 0.8.8 的能力
@@ -340,13 +350,14 @@ npm run tauri dev
 
 ## 更新日志
 
-### v0.8.2-beta
+### v0.8.2
 
 - 新增「自定义外观」：可选择本机图片作为应用背景，调整背景可见度，并覆盖主文字、次要文字与强调色
 - 新增「终端显示自定义背景」开关：关闭时终端保持主题纯色背景，开启后终端与界面其他部分一样透出背景图；已打开的终端实时生效
-- 修复设置窗口、确认弹窗等浮层透出后方终端内容的问题：弹窗只显示背景图，不再透出后面的界面内容
+- 修复设置窗口、确认弹窗、下拉菜单和搜索面板等浮层透出后方界面内容的问题：面板只显示对应位置的背景图，不再透出后面的界面内容
+- 会话组下拉：右键分组时列表不再收起，重命名 / 删除菜单浮在上方
 - Windows 安装器支持简体中文 / English 语言选择，中文系统默认中文
-- 版本号更新至 0.8.2-beta
+- 版本号更新至 0.8.2
 
 ### v0.8.1
 

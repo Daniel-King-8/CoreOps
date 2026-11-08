@@ -224,7 +224,7 @@
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div class="scrim" onclick={closePalette}></div>
-	<div class="palette" role="dialog" aria-modal="true" aria-label={t('palette.title')}>
+	<div class="palette wallpaper-surface" role="dialog" aria-modal="true" aria-label={t('palette.title')}>
 		<div class="search">
 			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
 				<circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8" />
@@ -285,8 +285,9 @@
 		position: fixed;
 		z-index: 901;
 		top: calc(var(--safe-top) + min(12dvh, 96px));
-		left: 50%;
-		transform: translateX(-50%);
+		left: 0;
+		right: 0;
+		margin-inline: auto;
 		width: min(600px, calc(100vw - var(--safe-left) - var(--safe-right) - 24px));
 		max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - min(12dvh, 96px) - 16px);
 		display: flex;
@@ -302,7 +303,7 @@
 	@keyframes drop {
 		from {
 			opacity: 0;
-			transform: translate(-50%, -6px);
+			transform: translateY(-6px);
 		}
 	}
 

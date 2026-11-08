@@ -550,3 +550,23 @@ html.custom-appearance .backdrop .modal {
   position: relative;
   z-index: 1;
 }
+
+/* Floating panels — menus, dropdowns, the command palette — sit above the
+   page, so their translucent surface would show the page through them. Paint
+   the same wallpaper inside the panel instead: it is opaque, so nothing
+   behind shows, while the panel still looks like the wallpaper with a theme
+   scrim. The global select menu is included because it is created by JS. */
+html.custom-appearance .wallpaper-surface,
+html.custom-appearance .select-menu {
+  background-color: transparent !important;
+  background-image:
+    linear-gradient(var(--color-bg-elevated), var(--color-bg-elevated)),
+    var(--custom-appearance-image) !important;
+  /* The first layer is the theme scrim; the second is the page picture, sized
+     and offset by lib/utils/wallpaper-surface so the panel shows the same crop
+     as the wallpaper behind its position. */
+  background-size: 100% 100%, var(--wallpaper-image-size, cover) !important;
+  background-position: 0 0, var(--wallpaper-image-position, center) !important;
+  background-repeat: no-repeat !important;
+  background-origin: border-box !important;
+}

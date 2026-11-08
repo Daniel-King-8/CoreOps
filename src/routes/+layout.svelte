@@ -23,6 +23,7 @@
 	import * as mcp from '#lib/state/mcp.svelte.js';
 	import * as share from '#lib/state/share.svelte.js';
 	import { installSelectMenus } from '#lib/utils/selectMenu.js';
+	import { startWallpaperSurfaceTracking } from '#lib/utils/wallpaper-surface.js';
 	import { initScreenEdges } from '#lib/edges.js';
 	import { onMount } from 'svelte';
 
@@ -71,6 +72,7 @@
 		initScreenEdges();
 		startupUpdateCheck();
 		startPeriodicChecks();
+		const stopWallpaperSurfaces = startWallpaperSurfaceTracking();
 
 		// The Svelte app has loaded and mounted — signal real readiness. The
 		// preloader listener in app.html reacts to this (no timer, no fake delay).
@@ -80,6 +82,7 @@
 			cleanupShortcuts();
 			stopSelectMenus();
 			stopPeriodicChecks();
+			stopWallpaperSurfaces();
 		};
 	});
 
