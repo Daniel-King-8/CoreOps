@@ -14,7 +14,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/based_on-Reach%200.8.8-0a84ff?style=flat-square" alt="Based on Reach 0.8.8" />
-  <img src="https://img.shields.io/badge/version-0.8.1-brightgreen?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-0.8.2--beta-brightgreen?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-333?style=flat-square" alt="Platforms" />
   <img src="https://img.shields.io/badge/AI-DeepSeek%20%7C%20Qwen%20%7C%20OpenAI-blueviolet?style=flat-square" alt="AI Support" />
 </p>
@@ -329,6 +329,14 @@ npm run tauri build    # production installers
 ---
 
 ## Changelog
+
+### v0.8.2-beta
+
+- Added Custom appearance: pick a local picture as the app background, adjust its visibility, and override the primary/secondary text and accent colours
+- Added a terminal background switch: keep the theme's solid terminal colour, or let the terminal show the custom picture like the rest of the interface. Open terminals update immediately
+- Settings and confirmation dialogs no longer show the interface behind them; they show the picture only
+- The Windows installer now offers Simplified Chinese and English, defaulting to Chinese on Chinese systems
+- Version set to 0.8.2-beta
 
 ### v0.8.1
 

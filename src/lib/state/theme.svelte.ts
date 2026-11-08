@@ -1,4 +1,5 @@
 import { themeListInstalled } from '#lib/ipc/theme.js';
+import { applyCustomAppearance } from './custom-theme.svelte.js';
 
 /**
  * Theme engine.
@@ -262,11 +263,18 @@ export function applyTheme(theme: Theme): void {
 	const root = document.documentElement;
 	for (const key of COLOR_KEYS) {
 		const value = theme.colors[key];
-		if (value) root.style.setProperty('--color-' + key, value);
+		if (value) {
+			// Keep the theme's own value separately: the custom-background
+			// layer mixes these with transparency instead of guessing what the
+			// theme's surface colour was.
+			root.style.setProperty('--theme-' + key, value);
+			root.style.setProperty('--color-' + key, value);
+		}
 	}
 	root.classList.remove('dark', 'light');
 	root.classList.add(theme.appearance);
 	themeState.current = theme;
+	applyCustomAppearance();
 }
 
 /** Reject a theme that would leave part of the app unstyled. */

@@ -483,3 +483,70 @@ select:not([multiple]):disabled {
   gap: 8px;
   padding: 8px 0 4px;
 }
+
+/* Optional custom background picture. Painted behind the app; the surfaces
+   above it use the theme's own colours mixed with transparency so the picture
+   is visible without making text unreadable. */
+html.custom-appearance,
+html.custom-appearance body {
+  background-color: transparent !important;
+}
+
+html.custom-appearance body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--custom-appearance-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: var(--custom-appearance-opacity, 1);
+}
+
+/* With the terminal switch on, the terminal's own layers stand aside so the
+   picture shows through exactly as it does in the rest of the app, at the same
+   global visibility. */
+html.custom-terminal-background .terminal-wrapper,
+html.custom-terminal-background .terminal-container,
+html.custom-terminal-background .terminal-container .xterm-viewport {
+  background: transparent !important;
+}
+
+/* A dialog must never show the interface behind it. When a custom picture is
+   set, the backdrop paints the picture itself — an opaque layer, so nothing
+   behind can show through — with the page's own tint plus a little extra dim.
+   The dialog then blends with that layer instead of the terminal underneath. */
+html.custom-appearance .backdrop {
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+html.custom-appearance .backdrop::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(0, 0, 0, 0.28), rgba(0, 0, 0, 0.28)),
+    linear-gradient(var(--color-bg-primary), var(--color-bg-primary)),
+    var(--custom-appearance-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+html.custom-appearance.light .backdrop::before {
+  background-image:
+    linear-gradient(rgba(15, 18, 24, 0.22), rgba(15, 18, 24, 0.22)),
+    linear-gradient(var(--color-bg-primary), var(--color-bg-primary)),
+    var(--custom-appearance-image);
+}
+
+html.custom-appearance .backdrop .modal {
+  position: relative;
+  z-index: 1;
+}

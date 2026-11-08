@@ -15,7 +15,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/基于-Reach%200.8.8-0a84ff?style=flat-square" alt="Based on Reach 0.8.8" />
-  <img src="https://img.shields.io/badge/version-0.8.1-brightgreen?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-0.8.2--beta-brightgreen?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-333?style=flat-square" alt="Platforms" />
   <img src="https://img.shields.io/badge/AI-DeepSeek%20%7C%20Qwen%20%7C%20OpenAI-blueviolet?style=flat-square" alt="AI Support" />
 </p>
@@ -339,6 +339,14 @@ npm run tauri dev
 ---
 
 ## 更新日志
+
+### v0.8.2-beta
+
+- 新增「自定义外观」：可选择本机图片作为应用背景，调整背景可见度，并覆盖主文字、次要文字与强调色
+- 新增「终端显示自定义背景」开关：关闭时终端保持主题纯色背景，开启后终端与界面其他部分一样透出背景图；已打开的终端实时生效
+- 修复设置窗口、确认弹窗等浮层透出后方终端内容的问题：弹窗只显示背景图，不再透出后面的界面内容
+- Windows 安装器支持简体中文 / English 语言选择，中文系统默认中文
+- 版本号更新至 0.8.2-beta
 
 ### v0.8.1
 

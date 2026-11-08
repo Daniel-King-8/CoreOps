@@ -92,9 +92,12 @@ jobs:
             | **Linux** | `.deb` / `.rpm` / `.AppImage` |
             | **Android** | `.apk` |
           releaseDraft: false
-          prerelease: false
+          # A -beta tag is published as a pre-release, and the Windows MSI target
+          # cannot encode a non-numeric pre-release identifier, so beta builds
+          # are NSIS-only. Stable tags keep building every bundle.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           updaterJsonPreferNsis: true
-          args: ${{ matrix.args }}
+          args: "${{ matrix.platform == 'windows-latest' && contains(github.ref_name, '-') && '--bundles nsis' || matrix.args }}"
 
       - name: Rename artifacts (Windows)
         if: matrix.platform == 'windows-latest'
@@ -235,6 +238,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
       # 在所有安装包重命名完成后重新生成 latest.json，确保下载 URL 与实际文件名一致
       - name: Generate correct latest.json after rename

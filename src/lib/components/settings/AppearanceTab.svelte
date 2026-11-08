@@ -13,8 +13,59 @@
 	import { shortcutLabel } from '#lib/state/shortcuts.svelte.js';
 	import { sessionLogDefaultDir } from '#lib/ipc/ssh.js';
 	import { open as pickFolder } from '@tauri-apps/plugin-dialog';
+	import {
+		getCustomAppearance,
+		setCustomBackgroundImage,
+		setCustomBackgroundOpacity,
+		setCustomTerminalBackground,
+		setCustomColor,
+		resetCustomAppearance
+	} from '#lib/state/custom-theme.svelte.js';
 
 	const settings = getSettings();
+	const custom = $derived(getCustomAppearance());
+	let backgroundInput: HTMLInputElement | undefined = $state();
+
+	/** Scale a picked picture down before storing it. A phone photo is several
+	 *  megabytes; localStorage and the webview both prefer a background-sized
+	 *  JPEG to the original. */
+	async function onBackgroundPicked(event: Event): Promise<void> {
+		const input = event.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = '';
+		if (!file) return;
+		try {
+			const image = await readImage(file);
+			const scale = Math.min(1, 1920 / Math.max(1, image.width));
+			const canvas = document.createElement('canvas');
+			canvas.width = Math.max(1, Math.round(image.width * scale));
+			canvas.height = Math.max(1, Math.round(image.height * scale));
+			const context = canvas.getContext('2d');
+			if (!context) throw new Error('Canvas unavailable');
+			context.drawImage(image, 0, 0, canvas.width, canvas.height);
+			setCustomBackgroundImage(canvas.toDataURL('image/jpeg', 0.85));
+		} catch (err) {
+			addToast(String(err), 'error');
+		}
+	}
+
+	function readImage(file: File): Promise<HTMLImageElement> {
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onerror = () => reject(reader.error ?? new Error('Could not read the image'));
+			reader.onload = () => {
+				const image = new Image();
+				image.onerror = () => reject(new Error('Unsupported image'));
+				image.onload = () => resolve(image);
+				image.src = String(reader.result);
+			};
+			reader.readAsDataURL(file);
+		});
+	}
+
+	function effectiveColor(key: 'text-primary' | 'text-secondary' | 'accent', override: string): string {
+		return override || themeState.current?.colors[key] || '#ffffff';
+	}
 	let currentFont = $derived(settings.fontFamily || 'monospace');
 	let currentSize = $derived(settings.fontSize || 14);
 	let uiZoom = $derived(settings.uiZoom || 1);
@@ -234,6 +285,115 @@
 					<span class="theme-label">{choice.name}</span>
 				</button>
 			{/each}
+		</div>
+	</div>
+
+	<div class="setting-section">
+		<div class="section-head">
+			<span class="section-label">{t('settings.custom_appearance')}</span>
+			<button class="link-btn" onclick={resetCustomAppearance}>{t('settings.custom_reset')}</button>
+		</div>
+
+		<div class="setting-row">
+			<div class="setting-info">
+				<span class="setting-label">{t('settings.custom_background')}</span>
+				<span class="setting-description">{t('settings.custom_background_desc')}</span>
+			</div>
+			<div class="setting-control custom-bg-control">
+				{#if custom.backgroundImage}
+					<img class="custom-bg-preview" src={custom.backgroundImage} alt="" />
+				{/if}
+				<button class="row-btn primary" onclick={() => backgroundInput?.click()}>{t('settings.custom_choose_image')}</button>
+				{#if custom.backgroundImage}
+					<button class="row-btn" onclick={() => setCustomBackgroundImage('')}>{t('settings.custom_clear_image')}</button>
+				{/if}
+				<input
+					class="custom-bg-input"
+					type="file"
+					accept="image/*"
+					bind:this={backgroundInput}
+					onchange={onBackgroundPicked}
+				/>
+			</div>
+		</div>
+
+		{#if custom.backgroundImage}
+			<div class="setting-row">
+				<div class="setting-info">
+					<span class="setting-label">{t('settings.custom_background_opacity')}</span>
+					<span class="setting-description">{t('settings.custom_background_opacity_desc')}</span>
+				</div>
+				<div class="setting-control custom-opacity">
+					<input
+						type="range"
+						min="0"
+						max="100"
+						value={custom.backgroundOpacity}
+						oninput={(e) => setCustomBackgroundOpacity(Number(e.currentTarget.value))}
+					/>
+					<span class="custom-opacity-value">{custom.backgroundOpacity}%</span>
+				</div>
+			</div>
+
+			<div class="setting-row">
+				<div class="setting-info">
+					<span class="setting-label">{t('settings.custom_terminal_background')}</span>
+					<span class="setting-description">{t('settings.custom_terminal_background_desc')}</span>
+				</div>
+				<div class="setting-control">
+					<Toggle
+						hideLabel
+						checked={custom.terminalBackground}
+						label={t('settings.custom_terminal_background')}
+						onchange={setCustomTerminalBackground}
+					/>
+				</div>
+			</div>
+		{/if}
+
+		<div class="setting-row">
+			<div class="setting-info">
+				<span class="setting-label">{t('settings.custom_text_color')}</span>
+				<span class="setting-description">{t('settings.custom_color_desc')}</span>
+			</div>
+			<div class="setting-control">
+				<input
+					class="custom-color-input"
+					type="color"
+					value={effectiveColor('text-primary', custom.textPrimary)}
+					oninput={(e) => setCustomColor('textPrimary', e.currentTarget.value)}
+				/>
+			</div>
+		</div>
+
+		<div class="setting-row">
+			<div class="setting-info">
+				<span class="setting-label">{t('settings.custom_text_secondary_color')}</span>
+				<span class="setting-description">{t('settings.custom_color_desc')}</span>
+			</div>
+			<div class="setting-control">
+				<input
+					class="custom-color-input"
+					type="color"
+					value={effectiveColor('text-secondary', custom.textSecondary)}
+					oninput={(e) => setCustomColor('textSecondary', e.currentTarget.value)}
+				/>
+			</div>
+		</div>
+
+		<div class="setting-row">
+			<div class="setting-info">
+				<span class="setting-label">{t('settings.custom_accent_color')}</span>
+				<span class="setting-description">{t('settings.custom_color_desc')}</span>
+			</div>
+			<div class="setting-control">
+				<input
+					class="custom-color-input"
+					type="color"
+					value={effectiveColor('accent', custom.accent)}
+					oninput={(e) => setCustomColor('accent', e.currentTarget.value)}
+				/>
+			</div>
 		</div>
 	</div>
 
@@ -970,6 +1130,54 @@
 		font-size: 0.75rem;
 		color: var(--color-text-secondary);
 		font-family: var(--font-sans);
+	}
+
+	.custom-bg-control {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+		justify-content: flex-end;
+	}
+
+	.custom-bg-preview {
+		width: 44px;
+		height: 28px;
+		object-fit: cover;
+		border-radius: 5px;
+		border: 1px solid var(--color-border);
+	}
+
+	.custom-bg-input {
+		display: none;
+	}
+
+	.custom-opacity {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.custom-opacity input {
+		width: 150px;
+		accent-color: var(--color-accent);
+	}
+
+	.custom-opacity-value {
+		min-width: 34px;
+		text-align: right;
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
+	}
+
+	.custom-color-input {
+		width: 44px;
+		height: 28px;
+		padding: 0;
+		border: 1px solid var(--color-border);
+		border-radius: 5px;
+		background: transparent;
+		cursor: pointer;
 	}
 
 </style>

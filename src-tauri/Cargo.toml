@@ -1,6 +1,6 @@
 [package]
 name = "coreops"
-version = "0.8.1"
+version = "0.8.2-beta"
 description = "CoreOps - Cross-platform SSH & Remote Management Tool"
 authors = ["CoreOps Contributors"]
 edition = "2021"

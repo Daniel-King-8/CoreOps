@@ -12,6 +12,7 @@
 	import { untrustedRefsFromError } from '#lib/ipc/sessions.js';
 	import { registerBufferReader, unregisterBufferReader } from '#lib/state/terminal-buffer.svelte.js';
 	import { themeState } from '#lib/state/theme.svelte.js';
+	import { getCustomAppearance } from '#lib/state/custom-theme.svelte.js';
 	import { getSettings, updateSetting } from '#lib/state/settings.svelte.js';
 	import { countPasteLines, shouldWarnOnPaste } from '#lib/terminal/paste.js';
 	import { shouldRearmIme, nudgeCaret, REARM_SETTLE_MS } from '#lib/terminal/ime.js';
@@ -341,6 +342,9 @@
 			cursorStyle: 'bar',
 			scrollback: 10000,
 			allowProposedApi: true,
+			// Needed so the optional custom picture can show through the terminal;
+			// it must be set here, before open(), and cannot be changed later.
+			allowTransparency: true,
 			theme: { ...themeState.current.terminal }
 		});
 	}
@@ -350,8 +354,17 @@
 	// it was constructed with — which is why it stayed black in light mode.
 	$effect(() => {
 		const palette = themeState.current.terminal;
+		const custom = getCustomAppearance();
+		// The custom appearance switch asks the terminal to show the same picture
+		// as the rest of the app. The picture sits behind the app, so a transparent
+		// terminal background is all it takes; the global visibility setting still
+		// decides how strongly the picture shows through.
+		const showBackground = Boolean(custom.backgroundImage && custom.terminalBackground);
 		if (terminal) {
-			terminal.options.theme = { ...palette };
+			terminal.options.theme = {
+				...palette,
+				background: showBackground ? 'rgba(0, 0, 0, 0)' : palette.background
+			};
 		}
 	});
 
