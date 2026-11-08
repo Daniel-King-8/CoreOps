@@ -349,29 +349,29 @@ npm run tauri build    # production installers
 - The Windows installer now offers Simplified Chinese and English, defaulting to Chinese on Chinese systems
 - Version set to 0.8.2
 
-### v0.8.1
+### ~~v0.8.1~~
 
-- Fixed session drag-and-drop reordering; the order is remembered on this device
-- The session list now uses "session groups" throughout: group heading, search, and create button
-- "Private (this device)" is now "Default session group"
-- Session groups have a right-click menu with Rename and Delete
-- Added "Move session" to the session context menu, to move a session to another session group
-- Folders can be renamed from their context menu
-- Version set to 0.8.1
+- ~~Fixed session drag-and-drop reordering; the order is remembered on this device~~
+- ~~The session list now uses "session groups" throughout: group heading, search, and create button~~
+- ~~"Private (this device)" is now "Default session group"~~
+- ~~Session groups have a right-click menu with Rename and Delete~~
+- ~~Added "Move session" to the session context menu, to move a session to another session group~~
+- ~~Folders can be renamed from their context menu~~
+- ~~Version set to 0.8.1~~
 
-### v0.8.0
+### ~~v0.8.0~~
 
-Rebased on upstream Reach v0.8.8 while keeping every CoreOps customization.
+~~Rebased on upstream Reach v0.8.8 while keeping every CoreOps customization.~~
 
-- New base: ported from Reach 0.8.8, with all upstream features and fixes
-- Upstream additions: RDP/VNC tabs, command palette, split view and tab groups, WSL sessions, container/Kubernetes/database workspaces, password-manager integration, theme marketplace, host-key verification, file and folder upload, and more
-- Kept the enhanced CoreOps AI assistant: Normal / Plan Only / Auto Edit / Full Auto
-- Kept per-tab AI conversations with cleanup on tab close
-- Kept the interactive-command gate for sudo prompts and confirmations
-- Kept custom OpenAI-compatible API base URLs (DeepSeek, Qwen, SiliconFlow, Ollama, ...)
-- Kept model discovery, context/pricing display, and automatic `/v1` handling
-- Kept run-all/multi-command execution, abort, and resizable panel width
-- Version set to 0.8.0; the update feed remains CoreOps' own GitHub release
+- ~~New base: ported from Reach 0.8.8, with all upstream features and fixes~~
+- ~~Upstream additions: RDP/VNC tabs, command palette, split view and tab groups, WSL sessions, container/Kubernetes/database workspaces, password-manager integration, theme marketplace, host-key verification, file and folder upload, and more~~
+- ~~Kept the enhanced CoreOps AI assistant: Normal / Plan Only / Auto Edit / Full Auto~~
+- ~~Kept per-tab AI conversations with cleanup on tab close~~
+- ~~Kept the interactive-command gate for sudo prompts and confirmations~~
+- ~~Kept custom OpenAI-compatible API base URLs (DeepSeek, Qwen, SiliconFlow, Ollama, ...)~~
+- ~~Kept model discovery, context/pricing display, and automatic `/v1` handling~~
+- ~~Kept run-all/multi-command execution, abort, and resizable panel width~~
+- ~~Version set to 0.8.0; the update feed remains CoreOps' own GitHub release~~
 
 ### Older releases
 
