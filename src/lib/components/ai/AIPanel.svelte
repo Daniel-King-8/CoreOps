@@ -1,9 +1,14 @@
 <script lang="ts">
-	import { getAIChatState, sendMessage, executeCommand, executeAllCommands, collectCodeBlocks, closeAIPanel, clearChat, getExecutionMode, setExecutionMode, getActive, abortActiveSession, getInputPending, getInputLabel, getInputType, submitUserInput, cancelInput, type ExecutionMode, type TerminalInfo } from '#lib/state/ai-chat.svelte.js';
+	import { getAIChatState, sendMessage, executeCommand, executeAllCommands, collectCodeBlocks, isExecutableLanguage, closeAIPanel, clearChat, getExecutionMode, setExecutionMode, getActive, abortActiveSession, getInputPending, getInputLabel, getInputType, submitUserInput, cancelInput, type ExecutionMode, type TerminalInfo } from '#lib/state/ai-chat.svelte.js';
 	import { getAISettings } from '#lib/state/ai.svelte.js';
 	import { getSessionList } from '#lib/state/sessions.svelte.js';
 	import { readTerminalBuffer } from '#lib/state/terminal-buffer.svelte.js';
 	import { t } from '#lib/state/i18n.svelte.js';
+	import { addToast } from '#lib/state/toasts.svelte.js';
+	import { invoke } from '@tauri-apps/api/core';
+	import { marked } from 'marked';
+	import DOMPurify from 'dompurify';
+	import { openUrl } from '@tauri-apps/plugin-opener';
 
 	interface Props {
 		connectionId?: string;
@@ -20,6 +25,10 @@
 	let inputValue = $state('');
 	let modeMenuOpen = $state(false);
 	let gateInputValue = $state('');
+
+	$effect(() => {
+		if (!getInputPending()) gateInputValue = '';
+	});
 
 	function handleInputSubmit() { submitUserInput(gateInputValue); gateInputValue = ''; }
 	function handleInputCancel() { cancelInput(); gateInputValue = ''; }
@@ -57,6 +66,67 @@
 		if (!bufferId) return;
 		executeAllCommands(content, bufferId, activeTabType ?? 'local', connectionId);
 	}
+
+	// ── 导出当前标签页的 AI 对话 ──
+	let exporting = $state(false);
+
+	function pad(value: number): string {
+		return String(value).padStart(2, '0');
+	}
+
+	function formatTimestamp(timestamp: number): string {
+		const date = new Date(timestamp);
+		return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+	}
+
+	function buildChatMarkdown(): string {
+		const lines: string[] = [
+			`# ${t('ai.export_title')}`,
+			'',
+			`- ${t('ai.export_exported_at')}: ${formatTimestamp(Date.now())}`,
+			''
+		];
+
+		for (const message of chatState.messages) {
+			if (!message.content.trim()) continue;
+			const text = message.content.trimStart();
+			const role = message.role === 'assistant'
+				? t('ai.export_role_assistant')
+				: text.startsWith('[自动执行]')
+					? t('ai.export_role_auto')
+					: text.startsWith('[批量执行')
+						? t('ai.export_role_batch')
+						: text.startsWith('[待确认]')
+							? t('ai.export_role_pending')
+							: text.startsWith('执行命令：') || text.startsWith('已执行：')
+								? t('ai.export_role_manual')
+								: t('ai.export_role_user');
+			lines.push(`## ${role} · ${formatTimestamp(message.timestamp)}`, '', message.content.trim(), '');
+		}
+
+		return lines.join('\n').trimEnd() + '\n';
+	}
+
+	async function exportChat(): Promise<void> {
+		if (exporting || chatState.messages.length === 0) return;
+		exporting = true;
+		try {
+			const stamp = formatTimestamp(Date.now()).replace(/[: ]/g, '-');
+			const saved = await invoke<boolean>('devops_save_text', {
+				defaultName: `CoreOps-AI-chat-${stamp}.md`,
+				content: buildChatMarkdown(),
+				extensions: ['md'],
+				filterName: 'Markdown'
+			});
+			if (saved) addToast(t('ai.export_success'), 'success');
+		} catch (error) {
+			console.error('Could not export the AI conversation:', error);
+			addToast(t('ai.export_failed'), 'error');
+		} finally {
+			exporting = false;
+		}
+	}
+
 	let messagesContainer: HTMLDivElement | undefined = $state();
 	let copiedId = $state<string | undefined>();
 
@@ -110,8 +180,11 @@
 		return msg.content.startsWith('[自动执行]') ||
 		       msg.content.startsWith('已执行：') ||
 		       msg.content.startsWith('执行命令：') ||
-		       msg.content.startsWith('[待确认]') ||
 		       msg.content.startsWith('[批量执行');
+	}
+
+	function isPendingMessage(msg: { role: string; content: string }): boolean {
+		return msg.role === 'user' && msg.content.trimStart().startsWith('[待确认]');
 	}
 
 	// ── 原有逻辑 ──
@@ -151,6 +224,19 @@
 					executeCommand(command, bufferId, activeTabType ?? 'local', connectionId, ctx);
 				} else {
 					navigator.clipboard.writeText(command);
+				}
+			} else {
+				// Markdown 链接交给系统浏览器，避免在 Tauri WebView 内导航。
+				const anchor = target.closest('a');
+				const href = anchor?.getAttribute('href');
+				if (href && !href.startsWith('#')) {
+					e.preventDefault();
+					e.stopPropagation();
+					try {
+						void openUrl(new URL(href, window.location.href).toString()).catch(() => {});
+					} catch {
+						// 不是可解析的 URL，保持原样。
+					}
 				}
 			}
 		};
@@ -196,57 +282,84 @@
 	}
 
 	function handleKeydown(e: KeyboardEvent): void {
-		if (e.key === 'Enter' && !e.shiftKey) {
-			e.preventDefault();
-			handleSend();
-		}
+		if (e.key !== 'Enter' || e.shiftKey) return;
+		// AI 执行期间输入框保持可编辑；回车只换行，发送前必须先点停止按钮。
+		if (getActive()) return;
+		e.preventDefault();
+		handleSend();
+	}
+
+	function escapeHtml(value: string): string {
+		return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 	}
 
 	function renderContent(content: string, showRun: boolean = true): string {
-		// 1. XSS 防护：转义 HTML 特殊字符
-		let text = content
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;');
-
 		const mode = getExecutionMode();
 		const hasTerminal = !!(activeTabId || connectionId) && showRun && mode !== 'plan-only';
-		const placeholders: string[] = [];
 
-		// 2. 提取并保护代码块
-		text = text.replace(
-			/```(\w*)\n?([\s\S]*?)```/g,
-			(_, lang, code) => {
-				const idx = placeholders.length;
-				const actions = hasTerminal
-					? `<button class="run-btn" data-code="${encodeURIComponent(code.trim())}">${t('ai.run')}</button>`
-					: '';
-				placeholders.push(
-					`<div class="code-block"><div class="code-header"><span>${lang || 'code'}</span><div class="code-actions">${actions}<button class="copy-btn" data-code="${encodeURIComponent(code.trim())}">${t('ai.copy')}</button></div></div><pre><code>${code.trim()}</code></pre></div>`
-				);
-				return `\x00CB${idx}\x00`;
+		// 用 marked 渲染完整的 GFM（标题、表格、有序/无序列表、引用、链接等），
+		// 再用 DOMPurify 清理 AI 生成的 HTML。
+		let html: string;
+		try {
+			const renderer = new marked.Renderer();
+			// AI 文本里的原始 HTML 按普通文字显示，避免被当成标签吞掉。
+			renderer.html = ({ text }) => escapeHtml(text);
+			html = marked.parse(content, { async: false, gfm: true, breaks: true, renderer }) as string;
+		} catch {
+			html = `<pre>${escapeHtml(content)}</pre>`;
+		}
+		html = DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, ADD_ATTR: ['class'] });
+
+		// 在清理后的 HTML 上重建代码块，挂回“运行 / 复制”按钮。
+		const doc = new DOMParser().parseFromString(html, 'text/html');
+		for (const pre of Array.from(doc.querySelectorAll('pre'))) {
+			const code = pre.querySelector('code');
+			if (!code) continue;
+			const className = code.getAttribute('class') ?? '';
+			const language = (/language-([\w-]+)/.exec(className)?.[1] ?? '').toLowerCase();
+			const rawCode = code.textContent ?? '';
+
+			const wrapper = doc.createElement('div');
+			wrapper.className = 'code-block';
+
+			const header = doc.createElement('div');
+			header.className = 'code-header';
+			const label = doc.createElement('span');
+			label.textContent = language || 'code';
+			const actions = doc.createElement('div');
+			actions.className = 'code-actions';
+
+			if (hasTerminal && isExecutableLanguage(language)) {
+				const run = doc.createElement('button');
+				run.className = 'run-btn';
+				run.setAttribute('data-code', encodeURIComponent(rawCode));
+				run.textContent = t('ai.run');
+				actions.appendChild(run);
 			}
-		);
+			const copy = doc.createElement('button');
+			copy.className = 'copy-btn';
+			copy.setAttribute('data-code', encodeURIComponent(rawCode));
+			copy.textContent = t('ai.copy');
+			actions.appendChild(copy);
 
-		// 3. Markdown 粗体 **text**
-		text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+			header.append(label, actions);
+			const preEl = doc.createElement('pre');
+			const codeEl = doc.createElement('code');
+			codeEl.textContent = rawCode;
+			preEl.appendChild(codeEl);
+			wrapper.append(header, preEl);
+			pre.replaceWith(wrapper);
+		}
 
-		// 4. Markdown 斜体 *text*（避开 ** 残留）
-		text = text.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+		// 宽表格放进可横向滚动的容器，避免撑破 AI 面板。
+		for (const table of Array.from(doc.querySelectorAll('table'))) {
+			const wrapper = doc.createElement('div');
+			wrapper.className = 'table-wrap';
+			table.replaceWith(wrapper);
+			wrapper.appendChild(table);
+		}
 
-		// 5. 行内代码
-		text = text.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-
-		// 6. 无序列表 "- item" 或 "* item"
-		text = text.replace(/(^|<br>)[-*]\s(.+?)(?=<br>|$)/gm, '$1<li>$2</li>');
-
-		// 7. 换行
-		text = text.replace(/\n/g, '<br>');
-
-		// 8. 还原代码块
-		text = text.replace(/\x00CB(\d+)\x00/g, (_, idx) => placeholders[parseInt(idx)] || '');
-
-		return text;
+		return doc.body.innerHTML;
 	}
 
 </script>
@@ -266,6 +379,19 @@
 		<div class="panel-header">
 			<span class="panel-title">{t('ai.title')}</span>
 			<div class="header-actions">
+				<button
+					class="icon-btn"
+					onclick={exportChat}
+					disabled={exporting || chatState.messages.length === 0}
+					aria-label={t('ai.export_chat')}
+					title={t('ai.export_chat')}
+				>
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M12 3v12" />
+						<path d="M7 10l5 5 5-5" />
+						<path d="M5 21h14" />
+					</svg>
+				</button>
 				<button class="icon-btn" onclick={clearChat} aria-label={t('ai.clear_chat')} title={t('ai.clear_chat')}>
 					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 						<polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
@@ -295,7 +421,7 @@
 					</div>
 				{/if}
 				{#each chatState.messages as msg (msg.id)}
-					<div class="message-wrapper" class:auto-exec={isAutoExec(msg)}>
+					<div class="message-wrapper" class:auto-exec={isAutoExec(msg)} class:pending={isPendingMessage(msg)}>
 						<div class="message message-{msg.role}">
 							{@html renderContent(msg.content, !isAutoExec(msg))}
 							{#if msg.role === 'assistant' && !msg.content && chatState.loading}
@@ -384,9 +510,8 @@
 					class="chat-input"
 					bind:value={inputValue}
 					onkeydown={handleKeydown}
-					placeholder={getActive() ? t('ai.generating') : t('ai.placeholder')}
+					placeholder={getActive() ? t('ai.busy_hint') : t('ai.placeholder')}
 					rows="1"
-					disabled={getActive()}
 				></textarea>
 				{#if getActive()}
 					<button class="stop-btn" onclick={abortActiveSession} aria-label={t('ai.stop')} title={t('ai.stop')}>
@@ -477,6 +602,16 @@
 		color: var(--color-text-primary);
 	}
 
+	.icon-btn:disabled {
+		opacity: 0.4;
+		cursor: default;
+	}
+
+	.icon-btn:disabled:hover {
+		background-color: transparent;
+		color: var(--color-text-secondary);
+	}
+
 	.panel-disabled {
 		flex: 1;
 		display: flex;
@@ -535,14 +670,15 @@
 	}
 
 	/* ── 对齐规则 ── */
-	/* 用户发言：居右 */
-	.message-wrapper:has(.message-user):not(.auto-exec) {
+	/* 用户发言：居右（待确认消息除外） */
+	.message-wrapper:has(.message-user):not(.auto-exec):not(.pending) {
 		align-self: flex-end;
 		align-items: flex-end;
 	}
 
-	/* AI 回复 & 自动执行面板：统一居左 */
+	/* AI 回复、自动执行面板、待确认命令：统一居左 */
 	.message-wrapper.auto-exec,
+	.message-wrapper.pending,
 	.message-wrapper:has(.message-assistant) {
 		align-self: flex-start;
 		align-items: flex-start;
@@ -590,10 +726,69 @@
 		user-select: text;
 	}
 
+	/* ── Markdown 排版 ── */
+	.message :global(p) { margin: 0 0 6px; }
+	.message :global(p:last-child) { margin-bottom: 0; }
+	.message :global(h1), .message :global(h2), .message :global(h3), .message :global(h4) {
+		margin: 10px 0 6px;
+		line-height: 1.3;
+		font-weight: 600;
+	}
+	.message :global(h1) { font-size: 1.05rem; }
+	.message :global(h2) { font-size: 0.95rem; }
+	.message :global(h3) { font-size: 0.875rem; }
+	.message :global(h4) { font-size: 0.8125rem; }
+	.message :global(ul), .message :global(ol) { margin: 4px 0 6px; padding-left: 1.4em; }
+	.message :global(li) { margin: 2px 0; }
+	.message :global(blockquote) {
+		margin: 6px 0;
+		padding: 4px 8px;
+		border-left: 3px solid var(--color-border);
+		color: var(--color-text-secondary);
+	}
+	.message :global(.table-wrap) { margin: 6px 0; overflow-x: auto; }
+	.message :global(table) { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+	.message :global(th), .message :global(td) {
+		border: 1px solid var(--color-border);
+		padding: 4px 6px;
+		text-align: left;
+		vertical-align: top;
+		white-space: normal;
+	}
+	.message :global(th) { background-color: var(--color-bg-elevated); font-weight: 600; }
+	.message :global(a) { color: var(--color-accent); text-decoration: underline; }
+	.message :global(hr) { border: 0; border-top: 1px solid var(--color-border); margin: 8px 0; }
+	.message :global(img) { max-width: 100%; height: auto; border-radius: 6px; }
+	.message :global(p code), .message :global(li code), .message :global(td code), .message :global(blockquote code) {
+		background-color: var(--color-bg-primary);
+		padding: 1px 4px;
+		border-radius: 4px;
+		font-size: 0.75rem;
+	}
+	.message :global(.code-block pre) {
+		margin: 0;
+		padding: 8px;
+		overflow-x: auto;
+		font-size: 0.75rem;
+	}
+	.message :global(.code-block pre code) {
+		font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		white-space: pre;
+	}
+
 	/* ── 气泡配色 ── */
 	/* 用户发言：纯正科技蓝（跟随系统 accent），居右 */
 	.message-user {
 		background-color: var(--color-accent);
+		color: #fff;
+	}
+
+	/* 默认选中色是半透明蓝色，叠在蓝色用户气泡上几乎看不见；
+	   这里给蓝色气泡单独用白色高亮。消息正文由 {@html} 生成，
+	   子元素没有 Svelte 作用域类，因此后代必须用 :global。 */
+	.message-wrapper:not(.auto-exec):not(.pending) .message-user::selection,
+	.message-wrapper:not(.auto-exec):not(.pending) .message-user :global(*)::selection {
+		background: rgba(255, 255, 255, 0.35);
 		color: #fff;
 	}
 
@@ -604,11 +799,19 @@
 		border: 1px solid var(--color-border);
 	}
 
-	/* 自动执行面板：与 AI 同阵营，跟随系统主题色，居左 */
+	/* 自动执行 / 批量执行 / 手动执行：绿色表示“已经实际下发到终端”，
+	   与黄色的“待确认”区分，避免看起来像普通用户发言。 */
 	.message-wrapper.auto-exec .message-user {
-		background-color: var(--color-bg-secondary);
+		background-color: color-mix(in srgb, var(--color-success) 13%, transparent);
 		color: var(--color-text-primary);
-		border: 1px solid var(--color-border);
+		border: 1px solid color-mix(in srgb, var(--color-success) 50%, transparent);
+	}
+
+	/* 待确认的高危命令：左侧警告色，不能看起来像用户自己发的消息 */
+	.message-wrapper.pending .message-user {
+		background-color: color-mix(in srgb, var(--color-warning) 14%, transparent);
+		color: var(--color-text-primary);
+		border: 1px solid color-mix(in srgb, var(--color-warning) 55%, transparent);
 	}
 
 	.message-error {

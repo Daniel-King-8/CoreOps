@@ -1,6 +1,9 @@
 <script lang="ts">
 	import { getUpdaterState, downloadAndInstall, skipStartupUpdate } from '#lib/state/updater.svelte.js';
 	import { t } from '#lib/state/i18n.svelte.js';
+	import { marked } from 'marked';
+	import DOMPurify from 'dompurify';
+	import { openUrl } from '@tauri-apps/plugin-opener';
 
 	interface Props {
 		open: boolean;
@@ -27,6 +30,47 @@
 	function handleSkip() {
 		skipStartupUpdate();
 	}
+
+	/** Release notes are Markdown; render them, then clean the result. */
+	let notesHtml = $derived.by(() => {
+		const notes = updater.updateNotes;
+		if (!notes) return '';
+		try {
+			const html = marked.parse(notes, { async: false, gfm: true, breaks: true }) as string;
+			return DOMPurify.sanitize(html);
+		} catch {
+			// A malformed note should still be readable, never inject HTML.
+			return DOMPurify.sanitize(`<pre>${escapeHtml(notes)}</pre>`);
+		}
+	});
+
+	function escapeHtml(value: string): string {
+		return value.replace(/[&<>"']/g, (character) => {
+			switch (character) {
+				case '&': return '&amp;';
+				case '<': return '&lt;';
+				case '>': return '&gt;';
+				case '"': return '&quot;';
+				default: return '&#39;';
+			}
+		});
+	}
+
+	/** Links in a release note open outside the app, not inside the WebView. */
+	function handleNotesClick(event: MouseEvent): void {
+		const target = event.target;
+		if (!(target instanceof Element)) return;
+		const anchor = target.closest('a');
+		const href = anchor?.getAttribute('href');
+		if (!href || href.startsWith('#')) return;
+		event.preventDefault();
+		event.stopPropagation();
+		try {
+			void openUrl(new URL(href, window.location.href).toString()).catch(() => {});
+		} catch {
+			// Not a URL the webview can resolve; leave it alone.
+		}
+	}
 </script>
 
 {#if open}
@@ -49,8 +93,9 @@
 			{#if updater.updateNotes}
 				<div class="release-notes">
 					<h3 class="release-notes-heading">{t('updater.release_notes')}</h3>
-					<div class="release-notes-content">
-						<pre class="release-notes-text">{updater.updateNotes}</pre>
+					<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+					<div class="release-notes-content" onclick={handleNotesClick}>
+						<div class="release-notes-text">{@html notesHtml}</div>
 					</div>
 				</div>
 			{/if}
@@ -188,6 +233,7 @@
 	.release-notes-content {
 		max-height: 200px;
 		overflow-y: auto;
+		overflow-x: auto;
 		border-radius: 8px;
 		background: var(--color-surface-hover);
 		border: 1px solid var(--color-border, var(--color-border));
@@ -200,8 +246,123 @@
 		font-size: 0.8125rem;
 		line-height: 1.55;
 		color: var(--color-text-secondary, var(--color-text-secondary));
-		white-space: pre-wrap;
 		word-wrap: break-word;
+	}
+
+	.release-notes-text :global(h1),
+	.release-notes-text :global(h2),
+	.release-notes-text :global(h3),
+	.release-notes-text :global(h4) {
+		margin: 12px 0 6px;
+		color: var(--color-text-primary);
+		font-weight: 600;
+		line-height: 1.35;
+	}
+
+	.release-notes-text :global(h1:first-child),
+	.release-notes-text :global(h2:first-child),
+	.release-notes-text :global(h3:first-child),
+	.release-notes-text :global(h4:first-child) {
+		margin-top: 0;
+	}
+
+	.release-notes-text :global(h1) { font-size: 1rem; }
+	.release-notes-text :global(h2) { font-size: 0.9375rem; }
+	.release-notes-text :global(h3) { font-size: 0.875rem; }
+	.release-notes-text :global(h4) { font-size: 0.8125rem; }
+
+	.release-notes-text :global(p) {
+		margin: 0 0 8px;
+	}
+
+	.release-notes-text :global(p:last-child) {
+		margin-bottom: 0;
+	}
+
+	.release-notes-text :global(ul),
+	.release-notes-text :global(ol) {
+		margin: 0 0 8px;
+		padding-left: 20px;
+	}
+
+	.release-notes-text :global(li) {
+		margin: 2px 0;
+	}
+
+	.release-notes-text :global(strong) {
+		color: var(--color-text-primary);
+		font-weight: 600;
+	}
+
+	.release-notes-text :global(a) {
+		color: var(--color-accent);
+		text-decoration: none;
+	}
+
+	.release-notes-text :global(a:hover) {
+		text-decoration: underline;
+	}
+
+	.release-notes-text :global(code) {
+		padding: 1px 4px;
+		border-radius: 4px;
+		background: var(--color-surface-active);
+		font-family: var(--font-mono, 'JetBrains Mono', monospace);
+		font-size: 0.75rem;
+	}
+
+	.release-notes-text :global(pre) {
+		margin: 8px 0;
+		padding: 8px;
+		overflow-x: auto;
+		border-radius: 6px;
+		background: var(--color-surface-active);
+	}
+
+	.release-notes-text :global(pre code) {
+		padding: 0;
+		background: transparent;
+	}
+
+	.release-notes-text :global(table) {
+		width: 100%;
+		margin: 8px 0;
+		border-collapse: collapse;
+		font-size: 0.75rem;
+	}
+
+	.release-notes-text :global(th),
+	.release-notes-text :global(td) {
+		padding: 4px 6px;
+		border: 1px solid var(--color-border);
+		text-align: left;
+		vertical-align: top;
+	}
+
+	.release-notes-text :global(th) {
+		color: var(--color-text-primary);
+		font-weight: 600;
+		background: var(--color-surface-hover);
+	}
+
+	.release-notes-text :global(img) {
+		display: block;
+		max-width: 100%;
+		height: auto;
+		margin: 8px 0;
+		border-radius: 6px;
+	}
+
+	.release-notes-text :global(hr) {
+		margin: 10px 0;
+		border: none;
+		border-top: 1px solid var(--color-border);
+	}
+
+	.release-notes-text :global(blockquote) {
+		margin: 8px 0;
+		padding-left: 10px;
+		border-left: 2px solid var(--color-border);
 	}
 
 	.release-notes-content::-webkit-scrollbar {

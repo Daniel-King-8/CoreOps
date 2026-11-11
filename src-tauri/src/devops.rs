@@ -91,14 +91,23 @@ pub async fn devops_set_enabled(state: tauri::State<'_, crate::state::AppState>,
 /// system's own dialog, never a path the page names. Returns false when the
 /// user cancels.
 #[tauri::command]
-pub async fn devops_save_text(app: tauri::AppHandle, default_name: String, content: String) -> Result<bool, String> {
+pub async fn devops_save_text(
+    app: tauri::AppHandle,
+    default_name: String,
+    content: String,
+    extensions: Option<Vec<String>>,
+    filter_name: Option<String>,
+) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let name: String = default_name
         .chars()
         .map(|c| if "<>:\"/\\|?*".contains(c) || c.is_control() { '_' } else { c })
         .collect();
-    app.dialog().file().set_file_name(name).add_filter("Text", &["log", "txt"]).save_file(move |picked| {
+    let extensions = extensions.unwrap_or_else(|| vec!["log".to_string(), "txt".to_string()]);
+    let filter_name = filter_name.unwrap_or_else(|| "Text".to_string());
+    let extension_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    app.dialog().file().set_file_name(name).add_filter(&filter_name, &extension_refs).save_file(move |picked| {
         let _ = tx.send(picked);
     });
     let Some(picked) = rx.await.map_err(|e| e.to_string())? else { return Ok(false) };

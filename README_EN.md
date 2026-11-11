@@ -9,34 +9,40 @@
 <h1 align="center">CoreOps</h1>
 
 <p align="center">
-  A personal fork of <a href="https://github.com/alexandrosnt/Reach"><strong>Reach</strong></a> · Deeply customized for Chinese-speaking DevOps engineers
+  A cross-platform SSH client and remote operations workbench for Chinese-speaking DevOps teams
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/based_on-Reach%200.8.8-0a84ff?style=flat-square" alt="Based on Reach 0.8.8" />
-  <img src="https://img.shields.io/badge/version-0.8.2-brightgreen?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-0.8.3-brightgreen?style=flat-square" alt="Version 0.8.3" />
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-333?style=flat-square" alt="Platforms" />
   <img src="https://img.shields.io/badge/AI-DeepSeek%20%7C%20Qwen%20%7C%20OpenAI-blueviolet?style=flat-square" alt="AI Support" />
+  <img src="https://img.shields.io/badge/stack-Rust%20%2B%20Tauri%20v2-0a84ff?style=flat-square" alt="Rust + Tauri v2" />
 </p>
 
 ---
 
 ## What is CoreOps
 
-CoreOps is a cross-platform SSH client and remote operations tool, forked from [Reach](https://github.com/alexandrosnt/Reach) 0.8.8.
+CoreOps is a cross-platform SSH client and remote operations workbench built for Chinese-speaking DevOps teams. It is built on the native Rust core of Reach 0.8.8 and brings connections, file transfer, remote desktops, tunnels, automation, containers, Kubernetes, databases, and an AI operations assistant into one application.
 
-It keeps the full Reach foundation — native Rust SSH, SFTP, RDP/VNC, port forwarding, Ansible, OpenTofu, containers, Kubernetes, databases, and an encrypted vault — and adds two things for Chinese-speaking operations engineers:
+No Electron, no subscription, no account. Windows, macOS, Linux, and Android share one codebase. Sessions, keys, and settings stay on your machine by default; encrypted sync is optional when you need multiple devices.
 
-1. **A complete Chinese interface**: menus, prompts, error messages, confirmations, and the AI panel.
-2. **An enhanced AI operations assistant**: read the terminal, analyse it, generate commands, and inject them into the live terminal. It supports four execution modes, per-tab conversation contexts, and a gate for sudo and interactive prompts.
+---
 
-No Electron, no subscription, no account. Windows, macOS, Linux, and Android share one codebase.
+## Why CoreOps
+
+- **Native performance**: SSH through Rust and russh, with no OpenSSH dependency and no Electron overhead.
+- **One app for daily operations**: SSH, SFTP, RDP/VNC, port tunnels, Ansible, OpenTofu, Docker/K8s, and database workspaces.
+- **AI that works with the terminal**: reads the live terminal, generates commands, and injects them into the current session; four execution modes with write confirmation and interactive gates.
+- **Better Chinese localisation**: the interface, prompts, errors, and AI panel are fully localised, with nine languages available.
+- **Secure by default**: encrypted vault, host-key verification, and log redaction; session sharing and MCP stay off until enabled.
+- **Local-first**: no mandatory account or cloud service; turn on encrypted sync only when you need it.
 
 ---
 
 ## Features
 
-### 1. AI Operations Assistant (CoreOps enhancement)
+### 1. AI Operations Assistant
 
 The AI panel sits beside the terminal and works with the current session, not as a detached chat window.
 
@@ -45,10 +51,10 @@ The AI panel sits beside the terminal and works with the current session, not as
 - **Run all commands**: when a reply contains several commands, execute them in order as one batch.
 - **SSH / local PTY routing**: automatically uses `sshSend` or `ptyWrite` based on the active tab.
 - **Per-tab context**: each tab keeps its own conversation, so switching tabs does not mix histories; closing a tab clears it.
+- **Type while it runs**: the input stays editable during execution; Enter only inserts a newline, and you press the red stop button before sending.
 - **Abort**: stop a response or an execution at any time.
 - **Resizable panel**: drag the panel edge; the width is remembered.
-- **sudo and interactive-command gate**: when a command asks for a sudo password, a confirmation, `[y/N]`, or Enter, execution pauses and a dialog waits for your input.
-- **Dangerous-command detection**: in Auto Edit mode, service restarts, deletions, package management, disk operations, and firewall changes require confirmation first.
+- **Conversation export**: export the current tab's conversation as Markdown, labelled by source (you / auto-run / batch-run / pending / manual run).
 
 #### Four execution modes
 
@@ -57,9 +63,20 @@ The AI panel sits beside the terminal and works with the current session, not as
 | **Normal** | The AI can read the terminal and analyse it; commands run only when you click Run |
 | **Plan only** | Analysis and plans only; no command can be executed |
 | **Auto edit** | The AI may edit configuration files; high-risk commands still ask first |
-| **Full auto** | The AI reads, executes, analyses, and continues automatically — use only in controlled environments |
+| **Full auto** | Read-only checks run automatically; writes follow the policy; passwords and interactive commands still require you |
 
 The selected mode is stored locally and survives restarts.
+
+#### Safety boundaries
+
+- **Only shell blocks run**: only blocks explicitly tagged `bash`, `sh`, `shell`, or `zsh` are injected; untagged, `text`, and `console` blocks are display-only.
+- **Questions are not actions**: for “what images exist” or “check the status”, only the first read-only command runs, then the client stops instead of expanding into deployment or cleanup.
+- **Write confirmation**: in question mode, `mkdir`, `cp`, `rm`, `systemctl`, `docker run/pull` and similar writes become `[待确认]` instead of running automatically.
+- **Suggestions and references do not run**: commands under “suggested actions / for reference only / for future use” are not auto-executed; “I’ll run it myself” phrasing is not mistaken for a suggestion.
+- **Interactive gate**: `sudo`, password prompts, `[y/N]`, and “press Enter” pauses execution and opens an input dialog.
+- **Long-command protection**: waits for the shell prompt to return before typing the next command; pauses with a notice on timeout.
+- **Dangerous-command confirmation**: in Auto Edit mode, service restarts, deletions, package management, disk and firewall changes ask first.
+- **Round limit**: auto-execution stops after 10 rounds and says so, instead of looping forever.
 
 #### AI configuration
 
@@ -213,6 +230,14 @@ The selected mode is stored locally and survives restarts.
 - **Language picker** with search.
 - **Mobile layout**: Esc/Ctrl/Alt/arrow keys above the keyboard, pinch to zoom, and safe areas for notches, status bars, and the keyboard.
 
+#### Custom appearance
+
+**Settings → Appearance → Custom appearance** lets you pick a local picture as the app background and adjust its visibility. The picture stays on this device and is not synced with the vault.
+
+The terminal keeps the theme's solid colour by default. Turn on **Terminal background** and it shows the picture like the rest of the interface, applying immediately to open terminals.
+
+![Custom background and appearance](Picture/custom-background.png)
+
 ---
 
 ### 10. Platforms, Updates, and Migration
@@ -230,57 +255,66 @@ The selected mode is stored locally and survives restarts.
 
 ---
 
-## What CoreOps changes vs upstream Reach
+## Changelog
 
-> Some of these were later adopted by upstream Reach (for example, session drag-and-drop and the theme system). CoreOps 0.8.0 continues to focus on the **enhanced AI assistant** and the **Chinese experience**.
+### v0.8.3
 
-### 1. Complete Chinese interface
+- Added AI conversation export: a new button in the AI panel header, left of the clear button, exports only the current tab's conversation as Markdown
+- The update dialog now renders release notes as Markdown: headings, lists, tables, code blocks and images display properly
+- Fixed accidental AI auto-execution: only code blocks explicitly tagged `bash` run; untagged blocks, `console` blocks, output examples and config contents are never injected
+- Fixed the interaction gate: Chinese password prompts are recognised; Cancel stops execution and sends Ctrl+C; gates are isolated per tab; multi-line interactive commands require confirmation
+- Dangerous-command confirmation now covers `sudo`, account/permission changes, `/etc` edits, deletion and shutdown; in full-auto mode only password entry, password changes and interactive commands still ask
+- AI command output now filters download/pull progress lines and caps its length, so hundreds of progress updates are not sent to the model
+- Commands marked by the AI as “for reference only / for future use” are no longer auto-executed; the client skips them and asks you to run them manually
+- AI conversation export now distinguishes You / Auto-run / Batch run / Pending confirmation / Manual run
+- The chat input stays editable while the AI is running: type a draft freely, Enter only inserts a newline, and you must press the red stop button before sending
+- Fixed Markdown formatting of client-generated pending / auto-run / batch-run / executed messages: multi-line commands now use real code blocks instead of inline backticks
+- Fixed garbled terminal echo when a new command was typed while a long command (such as `docker pull`) was still running: the client now waits for the shell prompt and pauses auto-run on timeout
+- Full-auto mode no longer asks for confirmation because of error-handling statements such as `exit 1` inside a script; only standalone `exit` / `logout` still require manual handling
+- Progress filtering now also removes Docker “Download complete”, “Pull complete” and “Already exists” lines, and collapses repeated blank lines
+- Commands placed under “suggested actions / next steps / recommended plan” headings are no longer auto-executed; the client waits for you to press Run
+- Auto-run, batch-run and manual-run messages now use a green background and border, distinct from the yellow pending-confirmation message
+- Fixed invisible text selection on blue user messages: the highlight was the same blue as the bubble, so a white highlight is now used
+- Full-auto / auto-edit now distinguish “asking/inspecting” from “doing/deploying”: for questions, only the first read-only command runs, then the client stops instead of expanding into deployment or cleanup
+- Added write-operation detection: in question mode, `mkdir`, `cp`, `rm`, `systemctl`, `docker run/pull` and similar writes become `[待确认]` instead of running automatically
+- Raised the auto-execution round limit to 10 and show a clear notice when it is reached
+- The “suggested/recommended” guard now recognises “I’ll run it myself” phrasing to avoid false stops
+- Version set to 0.8.3
 
-The Chinese locale covers menus, buttons, prompts, errors, confirmations, and the AI panel.
+<details>
+<summary>Earlier versions</summary>
 
-### 2. Chinese AI operations assistant (the core change)
+### v0.8.2
 
-The AI panel turns “read the terminal → analyse → inject the command” into one loop, with four execution modes, per-tab contexts, a sudo/input gate, and run-all.
+- Added custom appearance: choose a local picture as the app background, adjust its visibility, and override the primary/secondary text and accent colours
+- Added a terminal background switch: the terminal keeps the theme's solid colour when off, and shows the picture when on; open terminals update immediately
+- Fixed settings, confirmation dialogs, dropdown menus, and the command palette showing the interface behind them
+- Session-group dropdown no longer collapses when right-clicking; the rename/delete menu stays above it
+- The Windows installer supports Simplified Chinese / English, defaulting to Chinese on Chinese systems
+- Version set to 0.8.2
 
-### 3. AI configuration panel
+### v0.8.1
 
-A dedicated AI tab in Settings: custom API base URL, encrypted key storage, model discovery, context window, and pricing.
+- Fixed session drag-and-drop ordering; the order is remembered locally
+- Unified the session list on “session group” terminology
+- Renamed “Private (this device)” to “Default session group”
+- Added a context menu for session groups: rename and delete
+- Added “Move session to” for moving sessions between groups
+- Added right-click rename for session folders
+- Version set to 0.8.1
 
-### 4. Session drag-and-drop
+### v0.8.0
 
-CoreOps once rewrote session reordering with Pointer Events to work around HTML5 drag-and-drop problems in Tauri WebView2 on Windows; upstream later adopted this.
+- Rebased on Reach 0.8.8 and gained its new features and fixes
+- Upstream additions: RDP / VNC, command palette, split panes and tab groups, WSL sessions, container / Kubernetes workspaces, database management, password-manager integration, theme marketplace, host-key verification, single-file and folder upload, and more
+- Kept the CoreOps AI assistant with Normal / Plan only / Auto edit / Full auto modes
+- Kept per-tab AI conversation contexts, cleaned up when a tab closes
+- Kept the password / confirmation gate for sudo and other interactive commands
+- Kept custom API endpoints, model discovery, context window and pricing, and `/v1` handling
+- Kept run-all, abort, and panel-width memory
+- Version set to 0.8.0; updates and signatures still point to CoreOps' own GitHub release
 
-### 5. Custom background and appearance (new in 0.8.2)
-
-**Settings → Appearance → Custom appearance** lets you pick a local picture as the app background, adjust its visibility, and override the primary/secondary text and accent colours. The picture is stored on this device only and is not synced with the vault.
-
-The terminal keeps the theme's solid colour by default. Turn on **Terminal background** and it shows the picture like the rest of the interface, applying immediately to open terminals.
-
-Settings, confirmation dialogs, dropdown menus and the command palette never show the interface behind them: each shows the matching part of the picture at its own position, covering what it should and staying aligned with the wallpaper.
-
-![Custom background and appearance](Picture/custom-background.png)
-
----
-
-## Inherited from Reach 0.8.8
-
-Everything below comes from upstream Reach 0.8.8:
-
-- SSH terminals, split panes, tab groups, and WebGL rendering
-- RDP / VNC remote desktops
-- SFTP explorer, folder upload, and in-place editing
-- Port forwarding, SOCKS proxies, and jump hosts
-- System monitoring and session logging
-- Command palette, start screen, and Quick Connect
-- WSL, local shells, and serial console
-- Ansible and OpenTofu / Terraform
-- Containers, Kubernetes, and databases
-- Encrypted vault, cloud sync, and shared vaults
-- Password managers (Passbolt)
-- Session sharing and the MCP server
-- Themes, the theme marketplace, and Lua plugins
-- Nine languages and the mobile layout
-- Auto-update, backup/restore, and host-key verification
+</details>
 
 ---
 
@@ -317,85 +351,51 @@ https://github.com/Daniel-King-8/CoreOps/releases
 
 ## Build from source
 
-Requirements: [Rust 1.99+](https://rustup.rs), [Node.js 22.17+](https://nodejs.org), and the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
+Requirements: [Rust 1.99+](https://rustup.rs), [Node.js 22.17+](https://nodejs.org), and the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
+# Clone the repository
 git clone https://github.com/Daniel-King-8/CoreOps.git
 cd CoreOps
 
+# Install frontend dependencies
 npm install
-npm run tauri dev      # development
-npm run tauri build    # production installers
+
+# Development mode (Vite + Tauri)
+npm run tauri dev
+
+# Production build
+npm run tauri build
+
+# Clear the cache if the version display or build artifacts look stale
+Remove-Item -Recurse -Force src-tauri/target/debug/.fingerprint/coreops*, src-tauri/target/debug/coreops* -ErrorAction SilentlyContinue
+npm run tauri dev
 ```
 
 ### Configure the AI assistant
 
-1. Open the app → Settings → **AI**.
-2. Enter the API base URL (the default is `https://api.deepseek.com/v1`; any OpenAI-compatible endpoint works).
-3. Enter the API key and click **Validate and fetch models**.
-4. Pick a model and enable the AI switch.
-5. Click the AI icon at the top right of the terminal to open the panel.
-
----
-
-## Changelog
-
-### v0.8.2
-
-- Added Custom appearance: pick a local picture as the app background, adjust its visibility, and override the primary/secondary text and accent colours
-- Added a terminal background switch: keep the theme's solid terminal colour, or let the terminal show the custom picture like the rest of the interface. Open terminals update immediately
-- Settings, confirmation dialogs, dropdown menus and the command palette no longer show the interface behind them; they show the matching part of the picture only
-- Session group dropdown: right-clicking a group keeps the list open, with the rename/delete menu on top
-- The Windows installer now offers Simplified Chinese and English, defaulting to Chinese on Chinese systems
-- Version set to 0.8.2
-
-### ~~v0.8.1~~
-
-- ~~Fixed session drag-and-drop reordering; the order is remembered on this device~~
-- ~~The session list now uses "session groups" throughout: group heading, search, and create button~~
-- ~~"Private (this device)" is now "Default session group"~~
-- ~~Session groups have a right-click menu with Rename and Delete~~
-- ~~Added "Move session" to the session context menu, to move a session to another session group~~
-- ~~Folders can be renamed from their context menu~~
-- ~~Version set to 0.8.1~~
-
-### ~~v0.8.0~~
-
-~~Rebased on upstream Reach v0.8.8 while keeping every CoreOps customization.~~
-
-- ~~New base: ported from Reach 0.8.8, with all upstream features and fixes~~
-- ~~Upstream additions: RDP/VNC tabs, command palette, split view and tab groups, WSL sessions, container/Kubernetes/database workspaces, password-manager integration, theme marketplace, host-key verification, file and folder upload, and more~~
-- ~~Kept the enhanced CoreOps AI assistant: Normal / Plan Only / Auto Edit / Full Auto~~
-- ~~Kept per-tab AI conversations with cleanup on tab close~~
-- ~~Kept the interactive-command gate for sudo prompts and confirmations~~
-- ~~Kept custom OpenAI-compatible API base URLs (DeepSeek, Qwen, SiliconFlow, Ollama, ...)~~
-- ~~Kept model discovery, context/pricing display, and automatic `/v1` handling~~
-- ~~Kept run-all/multi-command execution, abort, and resizable panel width~~
-- ~~Version set to 0.8.0; the update feed remains CoreOps' own GitHub release~~
-
-### Older releases
-
-See [CHANGELOG.md](CHANGELOG.md) for earlier changes.
+1. Open Settings → **AI**
+2. Enter the API base URL (default `https://api.deepseek.com/v1`, or any OpenAI-compatible endpoint)
+3. Enter the API key and click **Validate and fetch models**
+4. Choose a model and enable AI
+5. Click the AI icon in the top-right corner of the terminal to open the panel
 
 ---
 
 ## Acknowledgements
 
-Thanks to **[@alexandrosnt](https://github.com/alexandrosnt)** for creating Reach. All of CoreOps' SSH capabilities come from Reach; this project only adds a personal layer on top.
+CoreOps is built on [Reach](https://github.com/alexandrosnt/Reach) 0.8.8. Thanks to [@alexandrosnt](https://github.com/alexandrosnt) for creating Reach, and to all upstream contributors.
 
 **Upstream project: [https://github.com/alexandrosnt/Reach](https://github.com/alexandrosnt/Reach)**
 
+CoreOps is an independently maintained branch and does not speak for the Reach project.
+
 ---
 
-## Final notes
+## Feedback
 
-I am not a professional programmer, so this project will have rough edges and bugs. Thank you for your patience.
-
-The goal is simple: make my own operations work smoother, and hopefully help others with similar needs.
-
-If you find a bug, have a suggestion, or just want to talk, contact me:
+Found a bug, have a feature request, or just want to talk? Open an issue or send an email:
 
 📮 **Email: [1007887927@qq.com](mailto:1007887927@qq.com)**
 
-> CoreOps is a personal fork tailored to my own operations workflow and does not represent the official Reach project.
-> If you are looking for an SSH client, the original Reach is absolutely worth checking out.
+Every piece of feedback is read. Thanks for the support.
