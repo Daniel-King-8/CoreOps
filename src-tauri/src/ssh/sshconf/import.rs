@@ -93,6 +93,8 @@ pub struct Scan {
     pub hosts: Vec<HostImport>,
     /// The files read, for the dialog to name.
     pub files: Vec<String>,
+    /// The config file that was scanned (or the usual path for pasted text).
+    pub user_path: String,
 }
 
 fn sources(user: &Path, system: &Path) -> Vec<Source> {
@@ -121,11 +123,33 @@ fn host_names(text: &str) -> Vec<String> {
 
 /// Read the files and resolve every concrete host in them.
 pub fn scan(user: &Path, system: &Path) -> Scan {
+    scan_sources(sources(user, system), user, system)
+}
+
+/// Scan a config file the user picked instead of ~/.ssh/config.
+pub fn scan_path(user: &Path, system: &Path) -> Scan {
+    scan_sources(sources(user, system), user, system)
+}
+
+/// Scan pasted config text. `user` only names it, so relative Includes in the
+/// text resolve against the usual ~/.ssh directory.
+pub fn scan_text(user: &Path, text: String, system: &Path) -> Scan {
+    scan_sources(
+        vec![
+            Source { path: user.to_path_buf(), text: Some(text), user: true },
+            Source { path: system.to_path_buf(), text: None, user: false },
+        ],
+        user,
+        system,
+    )
+}
+
+fn scan_sources(sources: Vec<Source>, user: &Path, system: &Path) -> Scan {
     let sys = SystemEnv::new(ExecPolicy::Never);
     // A first read with a name no Host can match brings in every file,
     // Includes under blocks that do not apply included.
     let probe = Recording { sys: &sys, read: RefCell::new(Vec::new()) };
-    let _ = resolve(&sources(user, system), &Query { host: "\u{1}reach-scan".into(), ..Default::default() }, &probe);
+    let _ = resolve(&sources, &Query { host: "\u{1}reach-scan".into(), ..Default::default() }, &probe);
     let all_files = probe.read.into_inner();
     let system_path = system.to_path_buf();
     let mut names = Vec::new();
@@ -139,14 +163,18 @@ pub fn scan(user: &Path, system: &Path) -> Scan {
             }
         }
     }
-    let hosts = names.iter().map(|alias| import_host(alias, user, system, &sys)).collect();
-    Scan { hosts, files: all_files.iter().map(|(p, _)| p.display().to_string()).collect() }
+    let hosts = names.iter().map(|alias| import_host(alias, &sources, user, system, &sys)).collect();
+    Scan {
+        hosts,
+        files: all_files.iter().map(|(p, _)| p.display().to_string()).collect(),
+        user_path: user.display().to_string(),
+    }
 }
 
-fn import_host(alias: &str, user: &Path, system: &Path, sys: &SystemEnv) -> HostImport {
+fn import_host(alias: &str, sources: &[Source], user: &Path, system: &Path, sys: &SystemEnv) -> HostImport {
     let env = Recording { sys, read: RefCell::new(Vec::new()) };
     sys.refused.borrow_mut().clear();
-    let mut r = resolve(&sources(user, system), &Query { host: alias.into(), ..Default::default() }, &env);
+    let mut r = resolve(sources, &Query { host: alias.into(), ..Default::default() }, &env);
     let finish_errors = r.finish(&env);
     let exec_asked = sys.refused.borrow().clone();
     let plan = super::apply::Plan::new(&r, russh::client::Config::default(), &[], false);

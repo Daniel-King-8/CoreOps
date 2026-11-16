@@ -431,6 +431,8 @@ pub fn run() {
             inspect_key_file,
             // SSH Config commands
             sshconfig_scan,
+            sshconfig_scan_file,
+            sshconfig_scan_text,
             x11server_status,
             x11server_install,
             x11server_cancel,
@@ -842,6 +844,8 @@ pub fn run() {
             inspect_key_file,
             // SSH Config commands
             sshconfig_scan,
+            sshconfig_scan_file,
+            sshconfig_scan_text,
             x11server_status,
             x11server_install,
             x11server_cancel,

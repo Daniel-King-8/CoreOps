@@ -7,11 +7,15 @@ import {
 	loadSecureSettings
 } from './settings.svelte.js';
 
+/** How much reasoning a model is asked to spend. `auto` sends nothing. */
+export type ReasoningEffort = 'auto' | 'low' | 'medium' | 'high';
+
 export interface AISettings {
 	enabled: boolean;
 	apiKey: string;
 	apiUrl: string;
 	selectedModel: string;
+	reasoningEffort: ReasoningEffort;
 }
 
 export interface OpenRouterModel {
@@ -51,7 +55,8 @@ let aiSettings = $state<AISettings>({
 	apiUrl: 'https://api.deepseek.com/v1',
 	// `deepseek-chat` was retired on 2026-07-24 and now 404s; `deepseek-flash`
 	// is the current DeepSeek model name.
-	selectedModel: 'deepseek-flash'
+	selectedModel: 'deepseek-flash',
+	reasoningEffort: 'auto'
 });
 let models = $state<OpenRouterModel[]>([]);
 let modelsLoading = $state(false);
@@ -90,11 +95,15 @@ export function loadAISettings(): void {
 				enabled: boolean;
 				apiUrl: string;
 				selectedModel: string;
+				reasoningEffort: ReasoningEffort;
 			}>;
 			aiSettings.enabled = parsed.enabled ?? false;
 			if (parsed.apiUrl) aiSettings.apiUrl = parsed.apiUrl;
 			if (!aiSettings.selectedModel && parsed.selectedModel) {
 				aiSettings.selectedModel = parsed.selectedModel;
+			}
+			if (parsed.reasoningEffort === 'low' || parsed.reasoningEffort === 'medium' || parsed.reasoningEffort === 'high') {
+				aiSettings.reasoningEffort = parsed.reasoningEffort;
 			}
 		}
 	} catch {
@@ -141,7 +150,8 @@ function saveLocalSettings(): void {
 			JSON.stringify({
 				enabled: aiSettings.enabled,
 				apiUrl: aiSettings.apiUrl,
-				selectedModel: aiSettings.selectedModel
+				selectedModel: aiSettings.selectedModel,
+				reasoningEffort: aiSettings.reasoningEffort
 			})
 		);
 	} catch {
@@ -205,4 +215,35 @@ export async function fetchModels(): Promise<void> {
 
 export function getSelectedModelInfo(): OpenRouterModel | undefined {
 	return models.find((m) => m.id === aiSettings.selectedModel);
+}
+
+/**
+ * Provider parameters for the chosen reasoning effort.
+ *
+ * There is no single field every OpenAI-compatible API accepts: OpenAI and
+ * most aggregators take `reasoning_effort`, OpenRouter nests it under
+ * `reasoning`, and the Qwen-style endpoints take `enable_thinking`. Unknown
+ * endpoints get `reasoning_effort`; `auto` sends nothing at all, which is the
+ * way out if a model rejects it.
+ */
+export function reasoningParams(settings: AISettings = aiSettings): Record<string, unknown> {
+	const effort = settings.reasoningEffort;
+	if (effort === 'auto') return {};
+
+	let host = '';
+	try {
+		const raw = settings.apiUrl.trim();
+		const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+		host = new URL(withScheme).hostname.toLowerCase();
+	} catch {
+		return {};
+	}
+
+	if (host.endsWith('openrouter.ai')) return { reasoning: { effort } };
+	if (host.endsWith('dashscope.aliyuncs.com') || host.endsWith('siliconflow.cn')) {
+		return { enable_thinking: true };
+	}
+	// DeepSeek has no effort parameter; the reasoner model decides by itself.
+	if (host.endsWith('deepseek.com')) return {};
+	return { reasoning_effort: effort };
 }

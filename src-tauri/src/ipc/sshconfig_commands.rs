@@ -15,6 +15,22 @@ pub async fn sshconfig_scan() -> Result<Scan, String> {
     tokio::task::spawn_blocking(move || import::scan(&user, &system)).await.map_err(|e| e.to_string())
 }
 
+/// Every concrete host in a config file the user picked.
+#[tauri::command]
+pub async fn sshconfig_scan_file(path: String) -> Result<Scan, String> {
+    let user = std::path::PathBuf::from(path);
+    let system = SystemEnv::system_config();
+    tokio::task::spawn_blocking(move || import::scan_path(&user, &system)).await.map_err(|e| e.to_string())
+}
+
+/// Every concrete host in config text the user pasted.
+#[tauri::command]
+pub async fn sshconfig_scan_text(text: String) -> Result<Scan, String> {
+    let user = SystemEnv::user_config().ok_or("No home directory")?;
+    let system = SystemEnv::system_config();
+    tokio::task::spawn_blocking(move || import::scan_text(&user, text, &system)).await.map_err(|e| e.to_string())
+}
+
 /// Check if an SSH config file exists.
 #[tauri::command]
 pub async fn sshconfig_exists() -> Result<bool, String> {

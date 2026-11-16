@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.3-brightgreen?style=flat-square" alt="Version 0.8.3" />
+  <img src="https://img.shields.io/badge/version-0.8.4-brightgreen?style=flat-square" alt="Version 0.8.4" />
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-333?style=flat-square" alt="Platforms" />
   <img src="https://img.shields.io/badge/AI-DeepSeek%20%7C%20Qwen%20%7C%20OpenAI-blueviolet?style=flat-square" alt="AI Support" />
   <img src="https://img.shields.io/badge/stack-Rust%20%2B%20Tauri%20v2-0a84ff?style=flat-square" alt="Rust + Tauri v2" />
@@ -217,7 +217,7 @@ AI 面板位于终端右侧，不是独立的聊天窗口，而是和当前终�
 
 ---
 
-### 九、界面、主题与插件
+### 九、界面与主题
 
 - **主题系统**：内置深色/浅色主题，支持从主题市场安装第三方主题。
 - **整站主题**：主题不只改终端，标题栏、侧边栏、标签栏、面板、按钮、状态栏都会跟随。
@@ -225,7 +225,6 @@ AI 面板位于终端右侧，不是独立的聊天窗口，而是和当前终�
 - **设计系统**：统一字号、间距、圆角、阴影和颜色 token。
 - **界面缩放**：`Ctrl+=` / `Ctrl+-` 缩放整个窗口，`Ctrl+0` 恢复；终端字号可单独调整。
 - **可折叠侧边栏**、可拖拽宽度、移动端抽屉式布局。
-- **Lua 插件系统**：沙盒化脚本扩展，支持插件市场和权限声明。
 - **九种语言**：中文、英文、德语、西班牙语、法语、意大利语、希腊语、保加利亚语、俄语。
 - **语言选择器**：支持搜索语言名称。
 - **移动端适配**：Esc/Ctrl/Alt/方向键工具栏、双指缩放、刘海/状态栏/键盘安全区适配。
@@ -256,6 +255,26 @@ AI 面板位于终端右侧，不是独立的聊天窗口，而是和当前终�
 ---
 
 ## 更新日志
+
+### v0.8.4
+
+- 合并 Reach 0.8.9 的多行 snippet 修复：整段作为一次粘贴送入，交互程序不会再吞掉下一行
+- 合并 Reach 0.8.9 的长链接识别：`!`、`*`、`'`、括号之后的部分不再被截断
+- 合并 pageant 0.2.5 安全更新
+- 修复更新弹窗和通用对话框在自定义外观下半透明、透出后方界面的问题
+- 发行说明区域加高，长更新日志不再被截断
+- 修复多行命令的 `\r` 回显污染：命令回显不再被拆成碎片和空行
+- 多行命令输出中任意位置的回显行都会被剥离，AI 收到的输出更干净
+- 中止 AI 执行时记录 `[已中止]` 的命令和已捕获输出
+- AI 面板只在接近底部时自动滚动，向上翻看输出不会被拉回底部
+- 中文设为默认语言并置顶；首次启动即为中文，其他语言仍可切换
+- 终端标签支持拖拽排序
+- SSH 配置导入支持选择任意配置文件、粘贴配置内容，未找到主机时显示实际检查路径
+- 导入对话框中的检查路径改用次要文字颜色，跟随自定义外观的文字设置
+- 中文输入法下在 SSH 终端按 Shift 切换英文时，已输入的拼音会作为英文发送到终端，不再被输入法丢弃
+- AI 面板输入框旁新增“思考强度”按钮：自动 / 低 / 中 / 高，按服务商发送 `reasoning_effort`、OpenRouter `reasoning` 或 `enable_thinking`
+- 隐藏插件功能入口：侧边栏、设置页和首次启动向导不再显示插件，插件代码与后端保留
+- 版本号更新至 0.8.4
 
 ### v0.8.3
 

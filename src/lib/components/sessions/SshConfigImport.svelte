@@ -8,7 +8,8 @@
 	import Modal from '#lib/components/shared/Modal.svelte';
 	import Button from '#lib/components/shared/Button.svelte';
 	import SshOptionsReport from './SshOptionsReport.svelte';
-	import { sshconfigScan, weakeningKey, type HostImport } from '#lib/ipc/sshconfig.js';
+	import { open as openDialog } from '@tauri-apps/plugin-dialog';
+	import { sshconfigScan, sshconfigScanFile, sshconfigScanText, weakeningKey, type HostImport, type SshConfigScan } from '#lib/ipc/sshconfig.js';
 	import { sessionCreate, sessionList, sessionListFolders, sessionCreateFolder, type SessionConfig, type AuthMethod, type JumpHostConfig, type Folder } from '#lib/ipc/sessions.js';
 	import { addToast } from '#lib/state/toasts.svelte.js';
 	import { t } from '#lib/state/i18n.svelte.js';
@@ -24,6 +25,10 @@
 
 	let hosts = $state<HostImport[]>([]);
 	let files = $state<string[]>([]);
+	/** The file that was scanned, or the usual path when the text was pasted. */
+	let userPath = $state('');
+	let pasteOpen = $state(false);
+	let pasteText = $state('');
 	let existingSessions = $state<SessionConfig[]>([]);
 	let selected = $state<Set<string>>(new Set());
 	let expanded = $state<string | null>(null);
@@ -104,6 +109,16 @@
 		if (open) loadHosts();
 	});
 
+	function applyScan(scan: SshConfigScan): void {
+		selected = new Set();
+		expanded = null;
+		filter = '';
+		hosts = scan.hosts;
+		files = scan.files;
+		userPath = scan.userPath;
+		approvals = Object.fromEntries(scan.hosts.map((h) => [h.alias, { commands: [], weakenings: [] }]));
+	}
+
 	async function loadHosts(): Promise<void> {
 		loading = true;
 		error = undefined;
@@ -115,10 +130,38 @@
 		try {
 			const [scan, sessions, folderList] = await Promise.all([sshconfigScan(), sessionList(), sessionListFolders()]);
 			folders = folderList;
-			hosts = scan.hosts;
-			files = scan.files;
+			applyScan(scan);
 			existingSessions = sessions;
-			approvals = Object.fromEntries(scan.hosts.map((h) => [h.alias, { commands: [], weakenings: [] }]));
+		} catch (err) {
+			error = String(err);
+		} finally {
+			loading = false;
+		}
+	}
+
+	/** Read a config file anywhere on disk, not only ~/.ssh/config. */
+	async function pickFile(): Promise<void> {
+		const picked = await openDialog({ multiple: false, directory: false, title: t('session.import_pick_file') });
+		if (typeof picked !== 'string') return;
+		loading = true;
+		error = undefined;
+		try {
+			applyScan(await sshconfigScanFile(picked));
+		} catch (err) {
+			error = String(err);
+		} finally {
+			loading = false;
+		}
+	}
+
+	/** Parse OpenSSH config text pasted from another machine or terminal. */
+	async function parsePasted(): Promise<void> {
+		if (!pasteText.trim()) return;
+		loading = true;
+		error = undefined;
+		try {
+			applyScan(await sshconfigScanText(pasteText));
+			pasteOpen = false;
 		} catch (err) {
 			error = String(err);
 		} finally {
@@ -190,6 +233,30 @@
 	<div class="import-content">
 		<p class="import-desc">{t('sshopt.import_desc')}</p>
 
+		<div class="import-source">
+			<button class="select-btn" onclick={pickFile} disabled={loading || importing}>
+				{t('session.import_pick_file')}
+			</button>
+			<button class="select-btn" onclick={() => (pasteOpen = !pasteOpen)} disabled={loading || importing}>
+				{t('session.import_paste')}
+			</button>
+		</div>
+		{#if pasteOpen}
+			<textarea
+				class="tool-input paste-box"
+				rows="8"
+				placeholder={t('session.import_paste_hint')}
+				aria-label={t('session.import_paste')}
+				bind:value={pasteText}
+				disabled={loading || importing}
+			></textarea>
+			<div class="select-actions">
+				<button class="select-btn" onclick={parsePasted} disabled={loading || importing || !pasteText.trim()}>
+					{t('session.import_parse')}
+				</button>
+			</div>
+		{/if}
+
 		{#if loading}
 			<div class="import-loading">
 				<span class="spinner"></span>
@@ -199,6 +266,9 @@
 			<div class="import-error">{error}</div>
 		{:else if hosts.length === 0}
 			<p class="import-empty">{t('session.import_no_hosts')}</p>
+			{#if userPath}
+				<p class="import-path">{t('session.import_checked_path', { path: userPath })}</p>
+			{/if}
 		{:else}
 			{#if fileErrors.length > 0}
 				<div class="import-error">
@@ -354,10 +424,32 @@
 
 	.import-empty {
 		margin: 0;
-		padding: 24px 0;
+		padding: 24px 0 4px;
 		font-size: 0.8125rem;
 		color: var(--color-text-secondary);
 		text-align: center;
+	}
+
+	.import-path {
+		margin: 0 0 12px;
+		font-size: 0.75rem;
+		color: var(--color-text-secondary);
+		text-align: center;
+		word-break: break-all;
+	}
+
+	.import-source {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+
+	.paste-box {
+		width: 100%;
+		min-height: 120px;
+		resize: vertical;
+		font-family: var(--font-mono, monospace);
+		font-size: 0.75rem;
 	}
 
 	.select-actions {

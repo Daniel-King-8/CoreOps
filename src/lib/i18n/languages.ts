@@ -19,6 +19,8 @@ export interface Language {
 }
 
 export const LANGUAGES: Language[] = [
+	// 中文优先：这是面向中文运维场景的产品，列表第一项就是默认语言。
+	{ code: 'zh', name: '中文', english: 'Chinese' },
 	{ code: 'en', name: 'English', english: 'English' },
 	{ code: 'de', name: 'Deutsch', english: 'German' },
 	{ code: 'es', name: 'Español', english: 'Spanish' },
@@ -26,8 +28,7 @@ export const LANGUAGES: Language[] = [
 	{ code: 'el', name: 'Ελληνικά', english: 'Greek' },
 	{ code: 'it', name: 'Italiano', english: 'Italian' },
 	{ code: 'bg', name: 'Български', english: 'Bulgarian' },
-	{ code: 'ru', name: 'Русский', english: 'Russian' },
-	{ code: 'zh', name: '中文', english: 'Chinese' }
+	{ code: 'ru', name: 'Русский', english: 'Russian' }
 ];
 
 /** Look up a language, falling back to English rather than returning undefined. */

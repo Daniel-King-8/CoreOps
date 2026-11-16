@@ -2,6 +2,7 @@
 	import Button from '#lib/components/shared/Button.svelte';
 	import { t } from '#lib/state/i18n.svelte.js';
 	import { getSettings } from '#lib/state/settings.svelte.js';
+	import { findLanguage } from '#lib/i18n/languages.js';
 
 	interface Props {
 		onComplete: () => void;
@@ -34,7 +35,7 @@
 				<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M13.3 4.7L6.5 11.5L2.7 7.7" stroke="var(--color-success)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
 			</span>
 			<span class="summary-label">{t('settings.language')}</span>
-			<span class="summary-value">{settings.locale === 'en' ? 'English' : settings.locale}</span>
+			<span class="summary-value">{findLanguage(settings.locale).name}</span>
 		</div>
 		<div class="summary-item">
 			<span class="summary-icon">

@@ -1,6 +1,9 @@
 import enLocale from '../i18n/locales/en.json';
+import zhLocale from '../i18n/locales/zh.json';
 
-let locale: string = $state('en');
+// CoreOps is a Chinese-first build: the first paint is Chinese, and the
+// English locale stays statically loaded as the fallback for other languages.
+let locale: string = $state('zh');
 let translations: Map<string, string> = $state(new Map());
 
 function loadEntries(entries: Record<string, string>): void {
@@ -39,6 +42,8 @@ export function t(key: string, params?: Record<string, string | number>): string
 export async function changeLocale(newLocale: string): Promise<void> {
 	if (newLocale === 'en') {
 		loadEntries(enLocale);
+	} else if (newLocale === 'zh') {
+		loadEntries(zhLocale);
 	} else {
 		const module = await import(`../i18n/locales/${newLocale}.json`);
 		const entries: Record<string, string> = module.default ?? module;
@@ -54,5 +59,5 @@ export function getLocale(): string {
 	return locale;
 }
 
-// Load English on startup
-loadEntries(enLocale);
+// Load Chinese on startup; English is the fallback for every other locale.
+loadEntries(zhLocale);

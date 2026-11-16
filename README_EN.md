@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.3-brightgreen?style=flat-square" alt="Version 0.8.3" />
+  <img src="https://img.shields.io/badge/version-0.8.4-brightgreen?style=flat-square" alt="Version 0.8.4" />
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-333?style=flat-square" alt="Platforms" />
   <img src="https://img.shields.io/badge/AI-DeepSeek%20%7C%20Qwen%20%7C%20OpenAI-blueviolet?style=flat-square" alt="AI Support" />
   <img src="https://img.shields.io/badge/stack-Rust%20%2B%20Tauri%20v2-0a84ff?style=flat-square" alt="Rust + Tauri v2" />
@@ -217,7 +217,7 @@ The selected mode is stored locally and survives restarts.
 
 ---
 
-### 9. Interface, Themes, and Plugins
+### 9. Interface and Themes
 
 - **Theme system**: built-in dark and light themes, plus third-party themes from the marketplace.
 - **Whole-app theming**: title bar, sidebar, tab bar, panels, buttons, and status bar follow the theme, not only the terminal.
@@ -225,7 +225,6 @@ The selected mode is stored locally and survives restarts.
 - **Design system**: consistent type scale, spacing, radii, shadows, and colour tokens.
 - **Interface zoom**: `Ctrl+=` / `Ctrl+-` scales the whole window, `Ctrl+0` resets; terminal font size is separate.
 - **Collapsible sidebar**, draggable width, and a drawer layout on phones.
-- **Lua plugins**: sandboxed scripts, a plugin marketplace, and permission declarations.
 - **Nine languages**: Chinese, English, German, Spanish, French, Italian, Greek, Bulgarian, and Russian.
 - **Language picker** with search.
 - **Mobile layout**: Esc/Ctrl/Alt/arrow keys above the keyboard, pinch to zoom, and safe areas for notches, status bars, and the keyboard.
@@ -256,6 +255,26 @@ The terminal keeps the theme's solid colour by default. Turn on **Terminal backg
 ---
 
 ## Changelog
+
+### v0.8.4
+
+- Merged Reach 0.8.9's multi-line snippet fix: the whole snippet goes in as one paste, so an interactive program cannot swallow the next line
+- Merged Reach 0.8.9's link recognition: links are no longer cut at `!`, `*`, `'` or brackets
+- Merged the pageant 0.2.5 security update
+- Fixed the update dialog and shared dialogs showing the interface behind them under a custom appearance
+- Made the release-notes area taller so long notes are no longer cut off
+- Fixed `\r` echo pollution in multi-line commands: echoes are no longer split into fragments and blank lines
+- Echo lines are stripped anywhere in a multi-line output, not only at the start
+- Aborting an AI run now records the `[已中止]` command and the output captured so far
+- The AI panel only auto-scrolls near the bottom, so scrolling up no longer pulls you back down
+- Chinese is now the default and first language; other languages remain selectable
+- Terminal tabs can be reordered by dragging
+- SSH config import can pick any file or parse pasted text, and shows the path it checked when no hosts are found
+- The checked path in the import dialog now uses the secondary text colour and follows custom appearance settings
+- In the SSH terminal, pressing Shift in a Chinese IME sends the typed pinyin as English instead of letting the IME discard it
+- Added a “Reasoning effort” button beside the AI chat input: Auto / Low / Medium / High, sent as `reasoning_effort`, OpenRouter `reasoning`, or `enable_thinking` depending on the provider
+- Hidden all plugin entry points: the sidebar, Settings, and the first-run wizard no longer show plugins; the plugin code and backend are retained
+- Version set to 0.8.4
 
 ### v0.8.3
 

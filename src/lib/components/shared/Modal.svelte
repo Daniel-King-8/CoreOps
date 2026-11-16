@@ -64,7 +64,7 @@
 
 {#if open}
 	<div class="backdrop glass" style:z-index={zIndex}>
-		<div class="modal" role="dialog" aria-modal="true" aria-label={title || t('common.close_dialog')} style:max-width={maxWidth} style:height={height}>
+		<div class="modal wallpaper-surface" role="dialog" aria-modal="true" aria-label={title || t('common.close_dialog')} style:max-width={maxWidth} style:height={height}>
 			{#if title}
 				<header class="modal-header">
 					<h2 class="modal-title">{title}</h2>

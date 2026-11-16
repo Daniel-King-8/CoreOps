@@ -75,7 +75,7 @@
 
 {#if open}
 	<div class="update-backdrop" role="presentation">
-		<div class="update-card" role="alertdialog" aria-modal="true" aria-label={t('updater.title')}>
+		<div class="update-card wallpaper-surface" role="alertdialog" aria-modal="true" aria-label={t('updater.title')}>
 			<div class="card-header">
 				<div class="icon-container">
 					<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -172,9 +172,11 @@
 		box-shadow: var(--shadow-elevated, 0 8px 32px rgba(0, 0, 0, 0.25));
 		width: 90%;
 		max-width: 440px;
+		max-height: 90vh;
 		display: flex;
 		flex-direction: column;
-		overflow: hidden;
+		overflow-y: auto;
+		overflow-x: hidden;
 		animation: scaleIn var(--duration-default, 200ms) var(--ease-default, cubic-bezier(0.25, 0.1, 0.25, 1));
 		font-family: var(--font-sans, 'Inter', system-ui, -apple-system, sans-serif);
 	}
@@ -231,7 +233,7 @@
 	}
 
 	.release-notes-content {
-		max-height: 200px;
+		max-height: 340px;
 		overflow-y: auto;
 		overflow-x: auto;
 		border-radius: 8px;

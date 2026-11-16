@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getAIChatState, sendMessage, executeCommand, executeAllCommands, collectCodeBlocks, isExecutableLanguage, closeAIPanel, clearChat, getExecutionMode, setExecutionMode, getActive, abortActiveSession, getInputPending, getInputLabel, getInputType, submitUserInput, cancelInput, type ExecutionMode, type TerminalInfo } from '#lib/state/ai-chat.svelte.js';
-	import { getAISettings } from '#lib/state/ai.svelte.js';
+	import { getAISettings, updateAISetting, type ReasoningEffort } from '#lib/state/ai.svelte.js';
 	import { getSessionList } from '#lib/state/sessions.svelte.js';
 	import { readTerminalBuffer } from '#lib/state/terminal-buffer.svelte.js';
 	import { t } from '#lib/state/i18n.svelte.js';
@@ -53,6 +53,33 @@
 	function selectMode(mode: ExecutionMode): void {
 		setExecutionMode(mode);
 		modeMenuOpen = false;
+	}
+
+	// ── 思考强度（对话输入框旁） ──
+	const reasoningLevels: { value: ReasoningEffort; key: string }[] = [
+		{ value: 'auto', key: 'ai.reasoning_level_auto' },
+		{ value: 'low', key: 'ai.reasoning_level_low' },
+		{ value: 'medium', key: 'ai.reasoning_level_medium' },
+		{ value: 'high', key: 'ai.reasoning_level_high' }
+	];
+	let reasoningOpen = $state(false);
+
+	function reasoningIndex(): number {
+		const index = reasoningLevels.findIndex((level) => level.value === aiSettings.reasoningEffort);
+		return index < 0 ? 0 : index;
+	}
+
+	function reasoningLabel(): string {
+		return t(reasoningLevels[reasoningIndex()].key);
+	}
+
+	async function setReasoning(value: ReasoningEffort): Promise<void> {
+		await updateAISetting('reasoningEffort', value);
+	}
+
+	async function onReasoningSlider(e: Event & { currentTarget: HTMLInputElement }): Promise<void> {
+		const level = reasoningLevels[Number(e.currentTarget.value)];
+		if (level) await setReasoning(level.value);
 	}
 
 	/** AI 消息是否包含可执行代码块（供一键执行面板判断）。 */
@@ -195,8 +222,17 @@
 		setTimeout(() => { copiedId = undefined; }, 1500);
 	}
 
+	// 只有原本就在底部时才跟随新消息滚动；用户往上翻看输出时不要把人拉回去。
+	let stickToBottom = $state(true);
+
+	function onMessagesScroll(): void {
+		const el = messagesContainer;
+		if (!el) return;
+		stickToBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+	}
+
 	$effect(() => {
-		if (chatState.messages.length && messagesContainer) {
+		if (chatState.messages.length && messagesContainer && stickToBottom) {
 			messagesContainer.scrollTop = messagesContainer.scrollHeight;
 		}
 	});
@@ -414,7 +450,7 @@
 				<p class="hint">{t('ai.go_to_settings')}</p>
 			</div>
 		{:else}
-			<div class="messages" bind:this={messagesContainer}>
+			<div class="messages" bind:this={messagesContainer} onscroll={onMessagesScroll}>
 				{#if chatState.messages.length === 0}
 					<div class="empty-state">
 						<p>{t('ai.empty_hint')}</p>
@@ -506,6 +542,47 @@
 						</div>
 					{/if}
 				</div>
+				<div class="reasoning-switcher">
+					<button
+						class="reasoning-btn"
+						onclick={() => (reasoningOpen = !reasoningOpen)}
+						title={t('ai.reasoning')}
+						aria-label={t('ai.reasoning')}
+					>
+						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<path d="M12 3a5 5 0 0 0-3.4 8.7A4 4 0 0 0 8 19h1v2h6v-2h1a4 4 0 0 0-.6-7.3A5 5 0 0 0 12 3z" />
+						</svg>
+						<span>{reasoningLabel()}</span>
+					</button>
+				</div>
+				{#if reasoningOpen}
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<!-- svelte-ignore a11y_click_events_have_key_events -->
+					<div class="mode-backdrop" onclick={() => (reasoningOpen = false)}></div>
+					<div class="reasoning-popover">
+						<div class="reasoning-head">
+							<span class="reasoning-title">{t('ai.reasoning_title', { level: reasoningLabel() })}</span>
+							<div class="reasoning-actions">
+								<button onclick={() => setReasoning('auto')}>{t('ai.reasoning_default')}</button>
+								<button onclick={() => (reasoningOpen = false)}>{t('ai.reasoning_close')}</button>
+							</div>
+						</div>
+						<input
+							class="reasoning-range"
+							type="range"
+							min="0"
+							max="3"
+							step="1"
+							value={reasoningIndex()}
+							oninput={onReasoningSlider}
+							aria-label={t('ai.reasoning')}
+						/>
+						<div class="reasoning-scale">
+							<span>{t('ai.reasoning_faster')}</span>
+							<span>{t('ai.reasoning_smarter')}</span>
+						</div>
+					</div>
+				{/if}
 				<textarea
 					class="chat-input"
 					bind:value={inputValue}
@@ -1049,8 +1126,103 @@
 		line-height: 1.3;
 	}
 
+	/* ── 思考强度 ── */
+	.reasoning-switcher {
+		position: relative;
+		flex-shrink: 0;
+	}
+
+	.reasoning-btn {
+		display: flex;
+		align-items: center;
+		gap: 3px;
+		height: 28px;
+		padding: 0 6px;
+		border: 1px solid var(--color-border);
+		border-radius: 8px;
+		background: var(--color-bg-primary);
+		color: var(--color-text-secondary);
+		cursor: pointer;
+		font-size: 0.625rem;
+		font-family: var(--font-sans);
+		transition: color 150ms ease, border-color 150ms ease;
+	}
+
+	.reasoning-btn:hover {
+		border-color: var(--color-accent);
+		color: var(--color-accent);
+	}
+
+	.reasoning-popover {
+		position: absolute;
+		right: 12px;
+		bottom: calc(100% + 8px);
+		width: min(280px, calc(100% - 24px));
+		box-sizing: border-box;
+		padding: 12px;
+		background-color: var(--color-bg-elevated);
+		border: 1px solid var(--color-border);
+		border-radius: 12px;
+		box-shadow: var(--shadow-elevated);
+		z-index: 51;
+	}
+
+	.reasoning-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		margin-bottom: 12px;
+		font-size: 0.75rem;
+		color: var(--color-text-primary);
+	}
+
+	.reasoning-title {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.reasoning-actions {
+		display: flex;
+		flex-shrink: 0;
+		gap: 4px;
+	}
+
+	.reasoning-actions button {
+		border: none;
+		border-radius: 6px;
+		padding: 4px 8px;
+		background: var(--color-surface-hover);
+		color: var(--color-text-secondary);
+		font-family: var(--font-sans);
+		font-size: 0.6875rem;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+
+	.reasoning-actions button:hover {
+		background: var(--color-surface-active);
+		color: var(--color-text-primary);
+	}
+
+	.reasoning-range {
+		width: 100%;
+		accent-color: var(--color-accent);
+	}
+
+	.reasoning-scale {
+		display: flex;
+		justify-content: space-between;
+		margin-top: 4px;
+		font-size: 0.625rem;
+		color: var(--color-text-secondary);
+	}
+
 	/* ── 输入区 ── */
 	.input-area {
+		position: relative;
 		display: flex;
 		gap: 6px;
 		align-items: center;

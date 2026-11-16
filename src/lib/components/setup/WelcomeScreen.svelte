@@ -1,13 +1,14 @@
 <script lang="ts">
 	import PersonalizeStep from './PersonalizeStep.svelte';
-	import PluginsStep from './PluginsStep.svelte';
 	import TursoStep from './TursoStep.svelte';
 	import CompleteStep from './CompleteStep.svelte';
 	import { t } from '#lib/state/i18n.svelte.js';
 	import { updateSetting } from '#lib/state/settings.svelte.js';
 
 	let currentStep = $state(0);
-	const totalSteps = 4;
+	// Plugin setup is hidden along with the rest of the plugin feature, so the
+	// wizard is Personalize → Turso → Complete.
+	const totalSteps = 3;
 
 	function next() {
 		if (currentStep < totalSteps - 1) {
@@ -48,10 +49,8 @@
 			{#if currentStep === 0}
 				<PersonalizeStep onNext={next} />
 			{:else if currentStep === 1}
-				<PluginsStep onNext={next} onBack={back} />
-			{:else if currentStep === 2}
 				<TursoStep onNext={next} onBack={back} />
-			{:else if currentStep === 3}
+			{:else if currentStep === 2}
 				<CompleteStep onComplete={complete} onBack={back} />
 			{/if}
 		</div>

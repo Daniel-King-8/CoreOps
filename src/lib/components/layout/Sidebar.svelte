@@ -2,7 +2,6 @@
 	import FileExplorer from '#lib/components/explorer/FileExplorer.svelte';
 	import SessionList from '#lib/components/sessions/SessionList.svelte';
 	import TunnelManager from '#lib/components/tunnel/TunnelManager.svelte';
-	import PluginPanel from '#lib/components/plugin/PluginPanel.svelte';
 	import SnippetPanel from '#lib/components/snippets/SnippetPanel.svelte';
 	import RecipePanel from '#lib/components/recipes/RecipePanel.svelte';
 	import VaultPanel from '#lib/components/vault/VaultPanel.svelte';
@@ -11,7 +10,7 @@
 	import { t } from '#lib/state/i18n.svelte.js';
 	import { pendingSessionAction } from '#lib/state/palette.svelte.js';
 
-	type Section = 'sessions' | 'vault' | 'explorer' | 'tunnels' | 'snippets' | 'recipes' | 'plugins';
+	type Section = 'sessions' | 'vault' | 'explorer' | 'tunnels' | 'snippets' | 'recipes';
 
 	const STORAGE_KEY = 'reach-sidebar-width';
 	/* `sidebarWidth` is the width of the *panel*, not of the whole sidebar. The
@@ -96,12 +95,9 @@
 			label: t('sidebar.recipes'),
 			// A book: a recipe is something written down to be followed again.
 			icon: 'M4 19.5A2.5 2.5 0 016.5 17H20M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2zM9 7h7M9 11h5'
-		},
-		{
-			id: 'plugins',
-			label: t('sidebar.plugins'),
-			icon: 'M13 2L3 14h9l-1 8 10-12h-9l1-8z'
 		}
+		// The plugin marketplace is hidden until there are plugins to list; the
+		// panel, IPC and Rust side are kept so it can be brought back unchanged.
 	]);
 
 	function handleSectionClick(sectionId: Section): void {
@@ -236,8 +232,6 @@
 						<VaultPanel />
 					{:else if activeSection === 'recipes'}
 						<RecipePanel />
-					{:else if activeSection === 'plugins'}
-						<PluginPanel {connectionId} />
 					{/if}
 				</div>
 			{/key}

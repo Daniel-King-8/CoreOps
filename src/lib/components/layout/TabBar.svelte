@@ -1,6 +1,6 @@
 <script lang="ts">
 	import {
-		getTabs, getActiveTab, createTab, closeTab, activateTab, getSplit, splitWith, unsplit, getDraggedTab, setDraggedTab, type Tab,
+		getTabs, getActiveTab, createTab, closeTab, activateTab, getSplit, splitWith, unsplit, getDraggedTab, setDraggedTab, reorderTab, type Tab,
 		getGroups, createGroup, addToGroup, removeFromGroup, renameGroup, setGroupColor, toggleGroup, groupHidden, ungroup, closeGroup,
 		GROUP_COLORS, type GroupColor, type TabGroup
 	} from '#lib/state/tabs.svelte.js';
@@ -71,6 +71,8 @@
 	const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
 	const mod = isMac ? '⌘⇧' : 'Ctrl+Shift+';
 
+	let tabsScrollEl: HTMLDivElement | undefined = $state();
+
 	function beginDrag(e: PointerEvent, id: string): void {
 		if (e.button !== 0 || (e.target as HTMLElement).closest('button')) return;
 		const x0 = e.clientX;
@@ -80,6 +82,21 @@
 				setDraggedTab(id);
 				swallowClick = true;
 			}
+			// Horizontal drag inside the strip reorders tabs; dragging down onto
+			// the terminal keeps its split-view behaviour.
+			const strip = tabsScrollEl?.getBoundingClientRect();
+			if (!strip || ev.clientY < strip.top - 4 || ev.clientY > strip.bottom + 4) return;
+			if (!getDraggedTab()) return;
+			const over = document.elementFromPoint(ev.clientX, ev.clientY)?.closest<HTMLElement>('[data-tab-id]');
+			const overId = over?.dataset.tabId;
+			if (!overId || overId === id) return;
+			const list = getTabs();
+			const from = list.findIndex((t) => t.id === id);
+			const to = list.findIndex((t) => t.id === overId);
+			if (from === -1 || to === -1 || from === to) return;
+			// Grouped tabs keep their run; only regroup through the tab menu.
+			if (list[from].groupId || list[to].groupId) return;
+			reorderTab(from, to);
 		};
 		const up = () => {
 			window.removeEventListener('pointermove', move);
@@ -247,7 +264,7 @@
 	{#if activePage === 'terminal'}
 		<div class="divider"></div>
 
-		<div class="tabs-scroll">
+		<div class="tabs-scroll" bind:this={tabsScrollEl}>
 			{#each tabs as tab, i (tab.id)}
 				{#if startsGroup(i)}
 					{@const g = groups.find((x) => x.id === tab.groupId)}
@@ -285,6 +302,7 @@
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<div
 					class="tab"
+					data-tab-id={tab.id}
 					class:grouped={!!tab.groupId}
 					style:--group={tab.groupId ? groupColor(groups.find((x) => x.id === tab.groupId)?.color ?? 'grey') : undefined}
 					class:active={tab.id === activeTab?.id}

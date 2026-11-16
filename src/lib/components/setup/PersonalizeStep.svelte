@@ -155,7 +155,7 @@
 	<div class="fields">
 		<div class="field">
 			<span class="field-label">{t('settings.language')}</span>
-			<LanguageSelect value={settings.locale || 'en'} onchange={selectLanguage} />
+			<LanguageSelect value={settings.locale || 'zh'} onchange={selectLanguage} />
 		</div>
 
 		<div class="field">

@@ -68,11 +68,23 @@ export interface HostImport {
 export interface SshConfigScan {
   hosts: HostImport[];
   files: string[];
+  /** The config file that was scanned (or the usual path for pasted text). */
+  userPath: string;
 }
 
 /** Every concrete host in ~/.ssh/config (and what it includes), resolved as ssh would. */
 export async function sshconfigScan(): Promise<SshConfigScan> {
   return invoke<SshConfigScan>('sshconfig_scan');
+}
+
+/** Every concrete host in a config file the user picked. */
+export async function sshconfigScanFile(path: string): Promise<SshConfigScan> {
+  return invoke<SshConfigScan>('sshconfig_scan_file', { path });
+}
+
+/** Every concrete host in config text the user pasted. */
+export async function sshconfigScanText(text: string): Promise<SshConfigScan> {
+  return invoke<SshConfigScan>('sshconfig_scan_text', { text });
 }
 
 /** Check if an SSH config file exists. */

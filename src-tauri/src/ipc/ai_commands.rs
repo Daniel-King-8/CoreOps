@@ -7,6 +7,10 @@ pub struct AiChatRequest {
     pub api_key: String,
     pub model: String,
     pub messages: Vec<AiMessage>,
+    /// Provider-specific extras (reasoning effort, thinking switches). Merged
+    /// into the request body as-is; `None` sends exactly the usual fields.
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -15,11 +19,6 @@ pub struct AiMessage {
     pub content: String,
 }
 
-#[derive(Debug, Serialize)]
-struct OpenRouterRequest {
-    model: String,
-    messages: Vec<AiMessage>,
-}
 
 #[derive(Debug, Deserialize)]
 struct OpenRouterResponse {
@@ -59,10 +58,17 @@ pub async fn ai_chat(request: AiChatRequest) -> Result<String, String> {
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    let body = OpenRouterRequest {
-        model: request.model,
-        messages: request.messages,
-    };
+    let mut body = serde_json::json!({
+        "model": request.model,
+        "messages": request.messages,
+    });
+    if let Some(serde_json::Value::Object(extra)) = request.params {
+        if let Some(map) = body.as_object_mut() {
+            for (key, value) in extra {
+                map.insert(key, value);
+            }
+        }
+    }
 
     let res = client
         .post(&request.url)

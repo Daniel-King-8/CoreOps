@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { getAISettings, resolveApiBase } from './ai.svelte.js';
+import { getAISettings, resolveApiBase, reasoningParams } from './ai.svelte.js';
 import { sshSend } from '#lib/ipc/ssh.js';
 import { ptyWrite } from '#lib/ipc/pty.js';
 import { readTerminalBuffer } from '#lib/state/terminal-buffer.svelte.js';
@@ -224,7 +224,15 @@ function toApiMessages(skipId: string, msgs: AIChatMessage[]): { role: string; c
 async function aiInvoke(apiMessages: { role: string; content: string }[]): Promise<string> {
 	const settings = getAISettings();
 	if (!settings.enabled || !settings.apiKey || !settings.selectedModel) throw new Error('AI 未配置');
-	return invoke<string>('ai_chat', { request: { url: resolveApiBase(settings.apiUrl) + '/chat/completions', apiKey: settings.apiKey, model: settings.selectedModel, messages: apiMessages } });
+	return invoke<string>('ai_chat', {
+		request: {
+			url: resolveApiBase(settings.apiUrl) + '/chat/completions',
+			apiKey: settings.apiKey,
+			model: settings.selectedModel,
+			messages: apiMessages,
+			params: reasoningParams(settings)
+		}
+	});
 }
 
 export interface TerminalInfo { bufferId: string; tabType: 'ssh' | 'local'; connectionId?: string; }
@@ -393,10 +401,34 @@ function decodePayload(payload: unknown): string {
 	return '';
 }
 
+/**
+ * Emulate the terminal's carriage return: \r returns to column 0 and later
+ * characters overwrite what was there. Treating \r as a newline split command
+ * echoes mid-line and scattered blank lines into the output the AI sees.
+ */
+function collapseCarriageReturns(text: string): string {
+	if (!text.includes('\r')) return text;
+	const out: string[] = [];
+	for (const line of text.split('\n')) {
+		if (!line.includes('\r')) { out.push(line); continue; }
+		let buf = '';
+		let col = 0;
+		for (const ch of line) {
+			if (ch === '\r') { col = 0; continue; }
+			if (col < buf.length) buf = buf.slice(0, col) + ch + buf.slice(col + 1);
+			else buf += ch;
+			col++;
+		}
+		out.push(buf);
+	}
+	return out.join('\n');
+}
+
 function stripAnsi(str: string): string {
-	return str.replace(/\x1b\[[\d;?]*[A-Za-z]/g, '').replace(/\x1b\].*?(\x07|\x1b\\)/g, '')
+	const withoutAnsi = str.replace(/\x1b\[[\d;?]*[A-Za-z]/g, '').replace(/\x1b\].*?(\x07|\x1b\\)/g, '')
 		.replace(/\x1b[PX^_].*?\x1b\\/g, '').replace(/\x1b[=>]/g, '').replace(/\x1b[^\[\]]/g, '')
-		.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+		.replace(/\r\n/g, '\n');
+	return collapseCarriageReturns(withoutAnsi);
 }
 
 const MAX_AI_OUTPUT_LINES = 200;
@@ -633,10 +665,10 @@ async function captureCommandOutputInner(command: string, terminal: TerminalInfo
 		foundCommand = true;
 		startIdx = 1;
 	}
+	const expectedCmdLines = new Set(cmdLines);
 	if (foundCommand) {
 		// 跳过终端对多行命令的回显：逐行粘贴时每一行都会带提示符前缀，
 		// 某些终端则使用 `>` 续行提示符。
-		const expected = new Set(cmdLines);
 		let skipped = 0;
 		while (startIdx < lines.length && skipped <= cmdLines.length + 8) {
 			const raw = lines[startIdx];
@@ -645,7 +677,7 @@ async function captureCommandOutputInner(command: string, terminal: TerminalInfo
 				.replace(/^[^\s]+@[^\s]+[#$]\s*/, '')
 				.replace(/^>\s?/, '')
 				.trim();
-			if (stripped === '' || expected.has(stripped) || /^(?:\[[^\]]*\][#$]\s*)?>\s?/.test(raw)) {
+			if (stripped === '' || expectedCmdLines.has(stripped) || /^(?:\[[^\]]*\][#$]\s*)?>\s?/.test(raw)) {
 				startIdx++;
 				skipped++;
 				continue;
@@ -658,7 +690,13 @@ async function captureCommandOutputInner(command: string, terminal: TerminalInfo
 		/^[^a-zA-Z0-9]*[$#>]\s*$/.test(lines[endIdx - 1]) ||
 		/^\[[^\]]+\][#$]\s*$/.test(lines[endIdx - 1])
 	)) endIdx--;
-	const outputLines = lines.slice(startIdx, endIdx);
+	// 多行粘贴时，第二行开始会与真实输出交错回显；整段范围内剥掉
+	// “提示符 + 命令原文”行，而不是只处理开头连续的一段。
+	const outputLines = lines.slice(startIdx, endIdx).filter((line) => {
+		const match = line.match(/^(?:\[[^\]]*\][#$]|[^\s]+@[^\s]+[#$])\s*/);
+		if (!match) return true;
+		return !expectedCmdLines.has(line.slice(match[0].length).trim());
+	});
 	let progressFiltered = 0;
 	const filteredLines = outputLines.filter((line) => {
 		if (isProgressLine(line)) { progressFiltered++; return false; }
@@ -674,7 +712,18 @@ async function captureCommandOutputInner(command: string, terminal: TerminalInfo
 	if (!completed && !sessionClosed && !ctx(contextId).cancelled) {
 		result += '\n\n[注意] 等待 shell 提示符超时，命令可能仍在执行，以上输出可能不完整。';
 	}
-	return { output: limitAiOutput(result), completed: completed || sessionClosed, sessionClosed };
+	const limited = limitAiOutput(result);
+	// 用户中止时，调用方会直接返回，不会写入执行记录；这里补一条
+	// [已中止]，让对话和导出里能看到被中止的命令和已捕获的输出。
+	if (ctx(contextId).cancelled) {
+		ctx(contextId).messages.push({
+			id: crypto.randomUUID(),
+			role: 'user',
+			content: `[已中止]\n\n${mdCode(command, 'bash')}\n\n已捕获输出：\n\n${mdCode(limited, 'text')}`,
+			timestamp: Date.now()
+		});
+	}
+	return { output: limited, completed: completed || sessionClosed, sessionClosed };
 }
 
 function runCommandInTerminal(command: string, terminal: TerminalInfo, contextId: string): Promise<CommandResult> { return captureCommandOutput(command, terminal, contextId); }

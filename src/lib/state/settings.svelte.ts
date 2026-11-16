@@ -127,7 +127,7 @@ const defaults: Settings = {
 	fontFamily: 'monospace',
 	defaultShell: '/bin/bash',
 	openLastSession: false,
-	locale: 'en',
+	locale: 'zh',
 	minimizeToTray: false,
 	startWithSystem: false,
 	typeShellSetup: false,
